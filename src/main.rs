@@ -141,18 +141,62 @@ fn cmd_list() -> Result<()> {
         };
 
         let label = if wt.is_bare { " (bare)" } else { "" };
+        let size = if !wt.is_bare {
+            format!(" ({})", human_size(dir_size_shallow(&wt.path)))
+        } else {
+            String::new()
+        };
 
         println!(
-            "  {:<width$}  {}{}{}",
+            "  {:<width$}  {}{}{}{}",
             wt.branch,
             wt.path.display(),
             label,
             dirty,
+            size,
             width = max_branch,
         );
     }
 
     Ok(())
+}
+
+/// Get shallow disk usage of a directory (only direct children, not following symlinks).
+fn dir_size_shallow(path: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            // Skip symlinks — they don't cost real disk space
+            if e.path().symlink_metadata().ok()?.file_type().is_symlink() {
+                return Some(0);
+            }
+            if meta.is_file() {
+                Some(meta.len())
+            } else {
+                // For dirs, just show the entry size (not recursive — too slow)
+                Some(meta.len())
+            }
+        })
+        .sum()
+}
+
+fn human_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB {
+        format!("{:.1}G", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1}M", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{}K", bytes / KB)
+    } else {
+        format!("{}B", bytes)
+    }
 }
 
 // ── switch ─────────────────────────────────────────────────────────────

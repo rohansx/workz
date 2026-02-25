@@ -39,17 +39,65 @@ pub struct HooksConfig {
 }
 
 fn default_symlink_dirs() -> Vec<String> {
-    ["node_modules", "target", ".venv", "venv", ".direnv", "vendor"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    [
+        // JavaScript / Node
+        "node_modules",
+        // Rust
+        "target",
+        // Python
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        // Go
+        "vendor",
+        // JS framework caches
+        ".next",
+        ".nuxt",
+        ".svelte-kit",
+        ".turbo",
+        ".parcel-cache",
+        ".angular",
+        // Java / Kotlin
+        ".gradle",
+        "build",
+        // General
+        ".direnv",
+        ".cache",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 fn default_copy_patterns() -> Vec<String> {
-    [".env", ".env.*", ".env*", ".envrc", ".tool-versions"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    [
+        // Environment files
+        ".env",
+        ".env.*",
+        ".env*",
+        ".envrc",
+        // Tool versions
+        ".tool-versions",
+        ".node-version",
+        ".python-version",
+        ".ruby-version",
+        ".nvmrc",
+        // Package manager configs (may contain local registry tokens)
+        ".npmrc",
+        ".yarnrc.yml",
+        // Docker overrides
+        "docker-compose.override.yml",
+        "docker-compose.override.yaml",
+        // Secrets
+        ".secrets",
+        ".secrets.*",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 impl Default for SyncConfig {
