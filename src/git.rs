@@ -24,11 +24,32 @@ fn git_in(dir: &Path, args: &[&str]) -> Result<String> {
     git(&full_args)
 }
 
-/// Find the root of the current git repository.
+/// Find the root of the main git repository (not a worktree).
+/// Uses --git-common-dir to always resolve to the main repo, even when
+/// called from inside a worktree.
 pub fn repo_root() -> Result<PathBuf> {
-    let root = git(&["rev-parse", "--show-toplevel"])
+    let toplevel = git(&["rev-parse", "--show-toplevel"])
         .context("not inside a git repository")?;
-    Ok(PathBuf::from(root))
+    let common_dir = git(&["rev-parse", "--git-common-dir"])?;
+
+    let common = PathBuf::from(&common_dir);
+    // If common_dir is ".git", we're in the main repo — use toplevel
+    // If common_dir is an absolute path (e.g. /repo/.git), parent is the main repo
+    // If common_dir is a relative path (e.g. ../../repo/.git), resolve from toplevel
+    if common_dir == ".git" {
+        Ok(PathBuf::from(toplevel))
+    } else {
+        let abs = if common.is_absolute() {
+            common
+        } else {
+            PathBuf::from(&toplevel).join(&common)
+        };
+        // common_dir points to the .git dir — parent is the repo root
+        abs.parent()
+            .map(|p| p.to_path_buf())
+            .and_then(|p| p.canonicalize().ok())
+            .ok_or_else(|| anyhow::anyhow!("could not resolve main repo root"))
+    }
 }
 
 /// Get the repository name from the root path.

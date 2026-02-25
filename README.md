@@ -2,6 +2,8 @@
 
 **Zoxide for Git worktrees** — zero-config dependency syncing, fuzzy switching, and AI-agent support.
 
+![workz demo](demo.gif)
+
 Git worktrees let you work on multiple branches simultaneously, but they leave behind your `.env` files and force you to re-install `node_modules` every time. **workz** fixes this automatically.
 
 ## The Problem
