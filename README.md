@@ -23,13 +23,16 @@ workz start feature/login
 
 ## Features
 
-- **Auto-symlink heavy directories** — `node_modules`, `target`, `.venv`, `vendor` are symlinked, not duplicated
-- **Auto-copy env files** — `.env`, `.env.local`, `.envrc` carried over automatically
-- **Fuzzy switching** — zoxide-style instant navigation between worktrees
+- **Auto-symlink heavy directories** — `node_modules`, `target`, `.venv`, `vendor`, and 18+ more are symlinked, not duplicated
+- **Auto-copy env files** — `.env`, `.env.local`, `.envrc`, `.npmrc`, secrets, and more carried over automatically
+- **Smart project detection** — auto-detects Node/Rust/Python/Go/Java projects and only syncs relevant dirs
+- **Auto-install dependencies** — detects your package manager from lockfiles and installs if deps are missing
+- **Fuzzy TUI switching** — skim-powered fzf-style fuzzy finder to jump between worktrees
+- **Docker support** — `--docker` flag to auto-start containers, auto-stop on `done`
 - **AI-agent ready** — launch Claude Code, Cursor, or VS Code in a worktree with `--ai`
 - **Shell integration** — `cd` into worktrees automatically, just like zoxide
-- **Zero config** — works out of the box for Node, Rust, Python, and Go projects
-- **Custom rules** — optional `.workz.toml` for project-specific sync patterns
+- **Global + project config** — `~/.config/workz/config.toml` for defaults, `.workz.toml` per project
+- **Zero config** — works out of the box for Node, Rust, Python, Go, and Java projects
 - **Safe defaults** — never overwrites existing files, never force-deletes dirty worktrees
 
 ## Install
@@ -67,9 +70,10 @@ This gives you a `workz` shell function that auto-`cd`s into worktrees.
 ### Create a worktree
 
 ```bash
-workz start feature/login       # creates ../myrepo--feature-login
-workz start bugfix/crash -b main  # branch from main instead of HEAD
-workz start feature/auth --ai     # create + launch Claude Code
+workz start feature/login          # creates ../myrepo--feature-login
+workz start bugfix/crash -b main   # branch from main instead of HEAD
+workz start feature/auth --ai      # create + launch Claude Code
+workz start feature/api --docker   # create + docker compose up
 ```
 
 What happens:
@@ -85,16 +89,16 @@ workz list
 ```
 
 ```
-  main            /home/you/myrepo
-  feature-login   /home/you/myrepo--feature-login  [modified]
-  bugfix-crash    /home/you/myrepo--bugfix-crash
+  main            /home/you/myrepo (bare)
+  feature-login   /home/you/myrepo--feature-login  [modified] (142.3M)
+  bugfix-crash    /home/you/myrepo--bugfix-crash (89.1M)
 ```
 
 ### Switch between worktrees
 
 ```bash
-workz switch           # interactive picker
-workz switch login     # fuzzy match — jumps to feature-login
+workz switch           # opens fzf-style fuzzy finder
+workz switch login     # pre-fills query — fuzzy match to feature-login
 ```
 
 ### Remove a worktree
@@ -114,7 +118,12 @@ workz clean
 
 ## Configuration
 
-Create a `.workz.toml` in your project root to customize sync behavior:
+workz supports two layers of configuration:
+
+1. **Global** — `~/.config/workz/config.toml` (shared defaults across all repos)
+2. **Project** — `.workz.toml` in your repo root (project-specific overrides)
+
+Project config takes priority over global config.
 
 ```toml
 [sync]
@@ -135,13 +144,46 @@ post_start = "pnpm install --frozen-lockfile"
 pre_done = "docker compose down"
 ```
 
-Without a config file, workz uses sensible defaults that work for most Node, Rust, Python, and Go projects.
+Without a config file, workz uses sensible defaults that work for most projects.
 
 ### Default sync rules
 
-**Symlinked directories** (if they exist): `node_modules`, `target`, `.venv`, `venv`, `.direnv`, `vendor`
+**Symlinked directories** (22 dirs, project-type aware):
+- **Node**: `node_modules`, `.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.parcel-cache`, `.angular`
+- **Rust**: `target`
+- **Python**: `.venv`, `venv`, `__pycache__`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`
+- **Go**: `vendor`
+- **Java/Kotlin**: `.gradle`, `build`
+- **General**: `.direnv`, `.cache`
 
-**Copied files** (if they exist): `.env*`, `.envrc`, `.tool-versions`
+**Copied files** (17 patterns):
+- `.env`, `.env.*`, `.envrc`, `.tool-versions`, `.node-version`, `.python-version`, `.ruby-version`, `.nvmrc`, `.npmrc`, `.yarnrc.yml`, `docker-compose.override.yml`, `.secrets`, `.secrets.*`
+
+### Auto-install
+
+workz detects your package manager from lockfiles and installs dependencies if the deps directory is missing:
+
+| Lockfile | Command |
+|---|---|
+| `bun.lockb` / `bun.lock` | `bun install --frozen-lockfile` |
+| `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` |
+| `yarn.lock` | `yarn install --frozen-lockfile` |
+| `package-lock.json` | `npm ci` |
+| `uv.lock` | `uv sync` |
+| `Pipfile.lock` | `pipenv install` |
+| `poetry.lock` | `poetry install` |
+| `requirements.txt` | `pip install -r requirements.txt` |
+
+## Docker Support
+
+If your project has a `docker-compose.yml` (or `compose.yml`), workz can manage containers automatically:
+
+```bash
+workz start feature/api --docker   # creates worktree + runs docker compose up -d
+workz done feature/api             # stops containers + removes worktree
+```
+
+Supports both `docker compose` and `podman-compose` (prefers podman if available).
 
 ## AI Agent Workflow
 
@@ -159,12 +201,15 @@ workz start bugfix/perf --ai --ai-tool code     # launches VS Code
 |---|---|---|---|---|---|
 | Auto-symlink deps | yes | config required | no | no | no |
 | Auto-copy .env | yes | config required | config required | yes | no |
-| Fuzzy switching | yes | no | yes | no | no |
+| Smart project detection | yes | no | no | no | no |
+| Auto-install deps | yes | no | no | no | no |
+| Fuzzy TUI (skim/fzf) | yes | no | yes | no | no |
+| Docker integration | yes | no | no | no | no |
 | Shell cd integration | yes | no | no | no | no |
 | AI agent launch | yes | yes | no | no | no |
+| Global + project config | yes | no | no | no | no |
 | Zero config | yes | no | no | yes | no |
 | Single binary | yes | yes | yes | ? | no (npm) |
-| Custom config | yes | yes | yes | no | yes |
 
 ## Requirements
 

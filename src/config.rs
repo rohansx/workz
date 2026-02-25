@@ -111,14 +111,59 @@ impl Default for SyncConfig {
 }
 
 
-/// Load config from `.workz.toml` in the repo root, falling back to defaults.
+/// Load config: global (~/.config/workz/config.toml) merged with project (.workz.toml).
+/// Project config takes priority over global config.
 pub fn load_config(repo_root: &Path) -> Result<Config> {
-    let config_path = repo_root.join(CONFIG_FILE);
-    if config_path.exists() {
-        let contents = std::fs::read_to_string(&config_path)?;
-        let config: Config = toml::from_str(&contents)?;
-        Ok(config)
-    } else {
-        Ok(Config::default())
+    let global = load_global_config();
+    let project = load_project_config(repo_root);
+
+    match (global, project) {
+        (Some(g), Some(p)) => Ok(merge_configs(g, p)),
+        (None, Some(p)) => Ok(p),
+        (Some(g), None) => Ok(g),
+        (None, None) => Ok(Config::default()),
     }
+}
+
+fn load_global_config() -> Option<Config> {
+    let config_dir = dirs::config_dir()?;
+    let path = config_dir.join("workz").join("config.toml");
+    if !path.exists() {
+        return None;
+    }
+    let contents = std::fs::read_to_string(&path).ok()?;
+    toml::from_str(&contents).ok()
+}
+
+fn load_project_config(repo_root: &Path) -> Option<Config> {
+    let path = repo_root.join(CONFIG_FILE);
+    if !path.exists() {
+        return None;
+    }
+    let contents = std::fs::read_to_string(&path).ok()?;
+    toml::from_str(&contents).ok()
+}
+
+/// Merge two configs. Project values override global values.
+fn merge_configs(global: Config, project: Config) -> Config {
+    let default_sync = SyncConfig::default();
+
+    // If project specifies sync values, use them; otherwise fall back to global
+    let is_project_sync_default = project.sync.symlink == default_sync.symlink
+        && project.sync.copy == default_sync.copy
+        && project.sync.ignore.is_empty();
+
+    let sync = if is_project_sync_default {
+        // Project didn't customize sync, use global
+        global.sync
+    } else {
+        project.sync
+    };
+
+    let hooks = HooksConfig {
+        post_start: project.hooks.post_start.or(global.hooks.post_start),
+        pre_done: project.hooks.pre_done.or(global.hooks.pre_done),
+    };
+
+    Config { sync, hooks }
 }

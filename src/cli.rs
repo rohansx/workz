@@ -34,6 +34,10 @@ pub enum Commands {
         /// AI tool to launch (claude, cursor, code)
         #[arg(long, default_value = "claude", value_enum)]
         ai_tool: AiTool,
+
+        /// Run docker/podman compose up in the new worktree
+        #[arg(long)]
+        docker: bool,
     },
 
     /// List all worktrees with status
