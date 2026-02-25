@@ -38,6 +38,11 @@ workz start feature/login
 ## Install
 
 ```bash
+# Homebrew (macOS / Linux)
+brew tap rohansx/tap
+brew install workz
+
+# Cargo
 cargo install workz
 ```
 
@@ -214,7 +219,7 @@ workz start bugfix/perf --ai --ai-tool code     # launches VS Code
 ## Requirements
 
 - Git 2.15+ (for worktree support)
-- A Unix-like system (Linux, macOS) or Windows with Developer Mode
+- A Unix-like system (Linux, macOS)
 
 ## License
 
