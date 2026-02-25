@@ -1,0 +1,23 @@
+[package]
+name = "workz"
+version = "0.1.0"
+edition = "2021"
+description = "Zoxide for Git worktrees — zero-config sync, fuzzy switching, AI-ready"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rohansx/workz"
+keywords = ["git", "worktree", "cli", "developer-tools"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+glob = "0.3"
+dialoguer = "0.11"
+fuzzy-matcher = "0.3"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
