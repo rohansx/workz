@@ -32,6 +32,7 @@ fn main() -> Result<()> {
             force,
             delete_branch,
         } => cmd_done(branch.as_deref(), force, delete_branch),
+        Commands::Sync => cmd_sync(),
         Commands::Clean => cmd_clean(),
         Commands::Init { shell } => cmd_init(&shell),
     }
@@ -370,6 +371,23 @@ fn stop_docker(path: &std::path::Path) {
         .status();
 }
 
+// ── sync ───────────────────────────────────────────────────────────────
+
+fn cmd_sync() -> Result<()> {
+    let root = git::repo_root()?;
+    let cwd = std::env::current_dir()?;
+
+    if cwd == root {
+        bail!("you're in the main worktree — switch to a worktree first");
+    }
+
+    let config = config::load_config(&root)?;
+    println!("syncing worktree at {}", cwd.display());
+    sync::sync_worktree(&root, &cwd, &config.sync)?;
+    println!("done!");
+    Ok(())
+}
+
 // ── clean ──────────────────────────────────────────────────────────────
 
 fn cmd_clean() -> Result<()> {
@@ -436,6 +454,7 @@ if [ -n "$ZSH_VERSION" ]; then
             'ls:List all worktrees'
             'switch:Fuzzy-switch to a worktree'
             's:Fuzzy-switch to a worktree'
+            'sync:Sync symlinks, env files, and deps'
             'done:Remove a worktree'
             'clean:Prune orphaned worktrees'
             'init:Print shell integration script'
@@ -481,7 +500,7 @@ else
         prev="${COMP_WORDS[COMP_CWORD-1]}"
 
         if [[ ${COMP_CWORD} -eq 1 ]]; then
-            COMPREPLY=($(compgen -W "start list ls switch s done clean init" -- "$cur"))
+            COMPREPLY=($(compgen -W "start list ls switch s sync done clean init" -- "$cur"))
             return
         fi
 
@@ -526,12 +545,13 @@ end
 
 # Tab completions
 complete -c workz -e
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s done clean init" -a start -d "Create a new worktree"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s done clean init" -a list -d "List all worktrees"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s done clean init" -a switch -d "Fuzzy-switch to a worktree"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s done clean init" -a done -d "Remove a worktree"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s done clean init" -a clean -d "Prune orphaned worktrees"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s done clean init" -a init -d "Print shell integration script"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync done clean init" -a start -d "Create a new worktree"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync done clean init" -a list -d "List all worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync done clean init" -a switch -d "Fuzzy-switch to a worktree"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync done clean init" -a sync -d "Sync symlinks, env files, and deps"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync done clean init" -a done -d "Remove a worktree"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync done clean init" -a clean -d "Prune orphaned worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync done clean init" -a init -d "Print shell integration script"
 complete -c workz -n "__fish_seen_subcommand_from switch s" -a "(git worktree list --porcelain 2>/dev/null | string match -r '^branch refs/heads/(.+)' | string replace 'branch refs/heads/' '')"
 complete -c workz -n "__fish_seen_subcommand_from done" -a "(git worktree list --porcelain 2>/dev/null | string match -r '^branch refs/heads/(.+)' | string replace 'branch refs/heads/' '')"
 complete -c workz -n "__fish_seen_subcommand_from start" -l base -d "Base branch"

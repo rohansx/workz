@@ -65,6 +65,9 @@ pub enum Commands {
         delete_branch: bool,
     },
 
+    /// Sync symlinks, env files, and deps into the current worktree
+    Sync,
+
     /// Prune orphaned worktrees
     Clean,
 
