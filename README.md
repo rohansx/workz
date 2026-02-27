@@ -117,6 +117,15 @@ workz done feature/login --force # force-remove even with uncommitted changes
 workz done feature/login -d      # also delete the branch
 ```
 
+### Sync an existing worktree
+
+Already have worktrees created with `git worktree add`? No problem:
+
+```bash
+cd ../my-existing-worktree
+workz sync                  # applies symlinks, copies .env files, installs deps
+```
+
 ### Clean up stale entries
 
 ```bash
