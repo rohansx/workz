@@ -31,7 +31,7 @@ pub enum Commands {
         #[arg(short, long)]
         ai: bool,
 
-        /// AI tool to launch (claude, cursor, code)
+        /// AI tool to launch
         #[arg(long, default_value = "claude", value_enum)]
         ai_tool: AiTool,
 
@@ -68,8 +68,19 @@ pub enum Commands {
     /// Sync symlinks, env files, and deps into the current worktree
     Sync,
 
+    /// Show rich status of all worktrees
+    Status,
+
     /// Prune orphaned worktrees
-    Clean,
+    Clean {
+        /// Also remove worktrees whose branches are already merged into base
+        #[arg(long)]
+        merged: bool,
+
+        /// Base branch to check merged status against (defaults to main or master)
+        #[arg(long)]
+        base: Option<String>,
+    },
 
     /// Print shell integration script
     Init {
@@ -91,6 +102,10 @@ pub enum AiTool {
     Claude,
     Cursor,
     Code,
+    Aider,
+    Codex,
+    Gemini,
+    Windsurf,
 }
 
 impl std::fmt::Display for AiTool {
@@ -99,6 +114,10 @@ impl std::fmt::Display for AiTool {
             AiTool::Claude => write!(f, "claude"),
             AiTool::Cursor => write!(f, "cursor"),
             AiTool::Code => write!(f, "code"),
+            AiTool::Aider => write!(f, "aider"),
+            AiTool::Codex => write!(f, "codex"),
+            AiTool::Gemini => write!(f, "gemini"),
+            AiTool::Windsurf => write!(f, "windsurf"),
         }
     }
 }

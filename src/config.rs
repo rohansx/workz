@@ -66,6 +66,12 @@ fn default_symlink_dirs() -> Vec<String> {
         // General
         ".direnv",
         ".cache",
+        // IDE configs
+        ".vscode",
+        ".idea",
+        ".cursor",
+        ".claude",
+        ".zed",
     ]
     .iter()
     .map(|s| s.to_string())

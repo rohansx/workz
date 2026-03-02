@@ -33,7 +33,8 @@ fn main() -> Result<()> {
             delete_branch,
         } => cmd_done(branch.as_deref(), force, delete_branch),
         Commands::Sync => cmd_sync(),
-        Commands::Clean => cmd_clean(),
+        Commands::Status => cmd_status(),
+        Commands::Clean { merged, base } => cmd_clean(merged, base.as_deref()),
         Commands::Init { shell } => cmd_init(&shell),
     }
 }
@@ -99,6 +100,10 @@ fn launch_ai_tool(tool: &AiTool, path: &std::path::Path) -> Result<()> {
         AiTool::Claude => ("claude", vec!["--worktree"]),
         AiTool::Cursor => ("cursor", vec![path_str]),
         AiTool::Code => ("code", vec![path_str]),
+        AiTool::Windsurf => ("windsurf", vec![path_str]),
+        AiTool::Aider => ("aider", vec![]),
+        AiTool::Codex => ("codex", vec![]),
+        AiTool::Gemini => ("gemini", vec![]),
     };
 
     if which_exists(cmd) {
@@ -388,16 +393,87 @@ fn cmd_sync() -> Result<()> {
     Ok(())
 }
 
+// ── status ─────────────────────────────────────────────────────────────
+
+fn cmd_status() -> Result<()> {
+    let worktrees = git::worktree_list()?;
+
+    if worktrees.is_empty() {
+        println!("no worktrees found");
+        return Ok(());
+    }
+
+    let max_branch = worktrees.iter().map(|w| w.branch.len()).max().unwrap_or(0);
+
+    for wt in &worktrees {
+        if wt.is_bare {
+            println!("  {:<width$}  {} (bare)", wt.branch, wt.path.display(), width = max_branch);
+            continue;
+        }
+
+        let dirty = if git::is_dirty(&wt.path).unwrap_or(false) { " [modified]" } else { "" };
+        let size = human_size(dir_size_shallow(&wt.path));
+        let last = git::last_commit_relative(&wt.path)
+            .map(|t| format!("  {}", t))
+            .unwrap_or_default();
+
+        let has_compose = wt.path.join("docker-compose.yml").exists()
+            || wt.path.join("docker-compose.yaml").exists()
+            || wt.path.join("compose.yml").exists()
+            || wt.path.join("compose.yaml").exists();
+        let docker = if has_compose { "  [docker]" } else { "" };
+
+        println!(
+            "  {:<width$}  {}{}  {}{}{}",
+            wt.branch,
+            wt.path.display(),
+            dirty,
+            size,
+            last,
+            docker,
+            width = max_branch,
+        );
+    }
+
+    Ok(())
+}
+
 // ── clean ──────────────────────────────────────────────────────────────
 
-fn cmd_clean() -> Result<()> {
+fn cmd_clean(merged: bool, base: Option<&str>) -> Result<()> {
     println!("pruning stale worktrees...");
     let output = git::worktree_prune()?;
     if output.is_empty() {
-        println!("nothing to prune");
+        println!("  nothing stale to prune");
     } else {
         println!("{}", output);
     }
+
+    if merged {
+        let base_branch = base
+            .map(|s| s.to_string())
+            .unwrap_or_else(git::default_branch);
+
+        let merged_branches = git::merged_branches(&base_branch)?;
+        let worktrees = git::worktree_list()?;
+
+        let to_remove: Vec<_> = worktrees
+            .iter()
+            .filter(|wt| !wt.is_bare && merged_branches.contains(&wt.branch))
+            .collect();
+
+        if to_remove.is_empty() {
+            println!("  no worktrees with merged branches found");
+        } else {
+            for wt in to_remove {
+                println!("  removing merged worktree: {} ({})", wt.branch, wt.path.display());
+                if let Err(e) = git::worktree_remove(&wt.path, false) {
+                    eprintln!("  warning: could not remove {}: {}", wt.branch, e);
+                }
+            }
+        }
+    }
+
     println!("done!");
     Ok(())
 }
@@ -455,6 +531,7 @@ if [ -n "$ZSH_VERSION" ]; then
             'switch:Fuzzy-switch to a worktree'
             's:Fuzzy-switch to a worktree'
             'sync:Sync symlinks, env files, and deps'
+            'status:Show rich status of all worktrees'
             'done:Remove a worktree'
             'clean:Prune orphaned worktrees'
             'init:Print shell integration script'
@@ -487,6 +564,11 @@ if [ -n "$ZSH_VERSION" ]; then
                     '--ai-tool[AI tool]:tool:(claude cursor code)' \
                     '--docker[Run docker compose up]'
                 ;;
+            clean)
+                _arguments \
+                    '--merged[Remove worktrees with merged branches]' \
+                    '--base[Base branch]:branch:'
+                ;;
             init)
                 compadd -- zsh bash fish
                 ;;
@@ -500,7 +582,7 @@ else
         prev="${COMP_WORDS[COMP_CWORD-1]}"
 
         if [[ ${COMP_CWORD} -eq 1 ]]; then
-            COMPREPLY=($(compgen -W "start list ls switch s sync done clean init" -- "$cur"))
+            COMPREPLY=($(compgen -W "start list ls switch s sync status done clean init" -- "$cur"))
             return
         fi
 
@@ -513,6 +595,12 @@ else
                 ;;
             start)
                 COMPREPLY=($(compgen -W "--base --no-sync --ai --ai-tool --docker" -- "$cur"))
+                if [[ "$prev" == "--ai-tool" ]]; then
+                    COMPREPLY=($(compgen -W "claude cursor code aider codex gemini windsurf" -- "$cur"))
+                fi
+                ;;
+            clean)
+                COMPREPLY=($(compgen -W "--merged --base" -- "$cur"))
                 ;;
             init)
                 COMPREPLY=($(compgen -W "zsh bash fish" -- "$cur"))
@@ -545,19 +633,22 @@ end
 
 # Tab completions
 complete -c workz -e
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync done clean init" -a start -d "Create a new worktree"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync done clean init" -a list -d "List all worktrees"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync done clean init" -a switch -d "Fuzzy-switch to a worktree"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync done clean init" -a sync -d "Sync symlinks, env files, and deps"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync done clean init" -a done -d "Remove a worktree"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync done clean init" -a clean -d "Prune orphaned worktrees"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync done clean init" -a init -d "Print shell integration script"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a start -d "Create a new worktree"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a list -d "List all worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a switch -d "Fuzzy-switch to a worktree"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a sync -d "Sync symlinks, env files, and deps"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a status -d "Show rich status of all worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a done -d "Remove a worktree"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a clean -d "Prune orphaned worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a init -d "Print shell integration script"
 complete -c workz -n "__fish_seen_subcommand_from switch s" -a "(git worktree list --porcelain 2>/dev/null | string match -r '^branch refs/heads/(.+)' | string replace 'branch refs/heads/' '')"
 complete -c workz -n "__fish_seen_subcommand_from done" -a "(git worktree list --porcelain 2>/dev/null | string match -r '^branch refs/heads/(.+)' | string replace 'branch refs/heads/' '')"
 complete -c workz -n "__fish_seen_subcommand_from start" -l base -d "Base branch"
 complete -c workz -n "__fish_seen_subcommand_from start" -l no-sync -d "Skip sync operations"
 complete -c workz -n "__fish_seen_subcommand_from start" -s a -l ai -d "Launch AI coding tool"
-complete -c workz -n "__fish_seen_subcommand_from start" -l ai-tool -a "claude cursor code" -d "AI tool to launch"
+complete -c workz -n "__fish_seen_subcommand_from start" -l ai-tool -a "claude cursor code aider codex gemini windsurf" -d "AI tool to launch"
 complete -c workz -n "__fish_seen_subcommand_from start" -l docker -d "Run docker compose up"
+complete -c workz -n "__fish_seen_subcommand_from clean" -l merged -d "Remove worktrees with merged branches"
+complete -c workz -n "__fish_seen_subcommand_from clean" -l base -d "Base branch to check merged against"
 complete -c workz -n "__fish_seen_subcommand_from init" -a "zsh bash fish"
 "#;

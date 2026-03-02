@@ -180,3 +180,28 @@ pub fn is_dirty(path: &Path) -> Result<bool> {
 pub fn current_branch(path: &Path) -> Result<String> {
     git_in(path, &["branch", "--show-current"])
 }
+
+/// Get the last commit time as a human-readable relative string (e.g. "2 hours ago").
+pub fn last_commit_relative(path: &Path) -> Option<String> {
+    git_in(path, &["log", "-1", "--format=%cr"]).ok().filter(|s| !s.is_empty())
+}
+
+/// Return the default base branch (main, then master, then HEAD).
+pub fn default_branch() -> String {
+    for candidate in &["main", "master"] {
+        if git(&["rev-parse", "--verify", &format!("refs/heads/{candidate}")]).is_ok() {
+            return candidate.to_string();
+        }
+    }
+    "HEAD".to_string()
+}
+
+/// Return a set of branch names that are fully merged into `base`.
+pub fn merged_branches(base: &str) -> Result<Vec<String>> {
+    let output = git(&["branch", "--merged", base])?;
+    Ok(output
+        .lines()
+        .map(|l| l.trim().trim_start_matches("* ").to_string())
+        .filter(|b| !b.is_empty() && b != base)
+        .collect())
+}
