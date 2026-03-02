@@ -3,6 +3,7 @@ mod config;
 mod fleet;
 mod git;
 mod mcp;
+mod serve;
 mod sync;
 
 use anyhow::{bail, Result};
@@ -49,6 +50,7 @@ fn main() -> Result<()> {
             FleetCmd::Run { cmd } => fleet::cmd_run(&cmd),
             FleetCmd::Done { force } => fleet::cmd_done(force),
         },
+        Commands::Serve { port, no_open } => serve::run(port, no_open),
         Commands::Mcp => mcp::run(),
         Commands::Init { shell } => cmd_init(&shell),
     }
@@ -220,7 +222,7 @@ fn cmd_list() -> Result<()> {
     Ok(())
 }
 
-fn dir_size_shallow(path: &std::path::Path) -> u64 {
+pub fn dir_size_shallow(path: &std::path::Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(path) else {
         return 0;
     };
@@ -236,7 +238,7 @@ fn dir_size_shallow(path: &std::path::Path) -> u64 {
         .sum()
 }
 
-fn human_size(bytes: u64) -> String {
+pub fn human_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
     const GB: u64 = 1024 * MB;

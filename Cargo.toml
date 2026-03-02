@@ -1,6 +1,6 @@
 [package]
 name = "workz"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Zoxide for Git worktrees — zero-config sync, fuzzy switching, AI-ready"
 license = "MIT OR Apache-2.0"
@@ -17,6 +17,8 @@ toml = "0.8"
 glob = "0.3"
 skim = "0.10"
 dirs = "5"
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 
 [profile.release]
 strip = true

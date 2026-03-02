@@ -88,6 +88,17 @@ pub enum Commands {
         cmd: FleetCmd,
     },
 
+    /// Start a local web dashboard at localhost:PORT
+    Serve {
+        /// Port to listen on
+        #[arg(short, long, default_value = "7777")]
+        port: u16,
+
+        /// Don't automatically open the browser
+        #[arg(long)]
+        no_open: bool,
+    },
+
     /// Start an MCP server exposing workz tools to AI agents (stdio transport)
     Mcp,
 
