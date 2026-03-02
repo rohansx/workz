@@ -1289,7 +1289,7 @@ dependencies = [
 
 [[package]]
 name = "workz"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap 4.5.60",
