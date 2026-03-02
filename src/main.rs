@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod git;
+mod mcp;
 mod sync;
 
 use anyhow::{bail, Result};
@@ -35,6 +36,7 @@ fn main() -> Result<()> {
         Commands::Sync => cmd_sync(),
         Commands::Status => cmd_status(),
         Commands::Clean { merged, base } => cmd_clean(merged, base.as_deref()),
+        Commands::Mcp => mcp::run(),
         Commands::Init { shell } => cmd_init(&shell),
     }
 }

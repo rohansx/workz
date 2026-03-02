@@ -205,3 +205,13 @@ pub fn merged_branches(base: &str) -> Result<Vec<String>> {
         .filter(|b| !b.is_empty() && b != base)
         .collect())
 }
+
+/// List files with uncommitted changes (staged or unstaged) in a worktree.
+pub fn modified_files(path: &Path) -> Result<Vec<String>> {
+    let output = git_in(path, &["status", "--porcelain"])?;
+    Ok(output
+        .lines()
+        .filter(|l| l.len() > 3)
+        .map(|l| l[3..].trim().to_string())
+        .collect())
+}

@@ -82,6 +82,9 @@ pub enum Commands {
         base: Option<String>,
     },
 
+    /// Start an MCP server exposing workz tools to AI agents (stdio transport)
+    Mcp,
+
     /// Print shell integration script
     Init {
         /// Shell to generate integration for

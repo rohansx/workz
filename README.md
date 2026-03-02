@@ -232,6 +232,42 @@ workz start feature/x --ai --ai-tool gemini          # launches Gemini CLI
 workz start feature/y --ai --ai-tool windsurf        # launches Windsurf
 ```
 
+## MCP Server
+
+workz ships a built-in MCP server so AI agents can manage worktrees themselves — no human needed.
+
+### Setup
+
+```bash
+claude mcp add workz -- workz mcp
+```
+
+Or add to `~/.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "workz": {
+      "command": "workz",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Tools exposed to agents
+
+| Tool | Description |
+|------|-------------|
+| `workz_start` | Create a worktree with auto-synced deps and env |
+| `workz_list` | List all worktrees as structured JSON |
+| `workz_status` | Rich status: branch, dirty state, last commit |
+| `workz_sync` | Sync symlinks/env into an existing worktree |
+| `workz_done` | Remove a worktree (with optional force) |
+| `workz_conflicts` | Detect files modified in multiple worktrees |
+
+Once configured, Claude Code and other MCP-compatible agents can create and manage worktrees autonomously without any manual setup.
+
 ## How It Compares
 
 | Feature | workz | worktrunk | gwq | fracture | branchlet |
