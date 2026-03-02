@@ -25,13 +25,16 @@ workz start feature/login
 
 ## Features
 
-- **Auto-symlink heavy directories** — `node_modules`, `target`, `.venv`, `vendor`, and 18+ more are symlinked, not duplicated
+- **Auto-symlink heavy directories** — `node_modules`, `target`, `.venv`, `vendor`, and 22+ more are symlinked, not duplicated
 - **Auto-copy env files** — `.env`, `.env.local`, `.envrc`, `.npmrc`, secrets, and more carried over automatically
+- **IDE config sync** — `.vscode`, `.idea`, `.cursor`, `.claude`, `.zed` symlinked automatically
 - **Smart project detection** — auto-detects Node/Rust/Python/Go/Java projects and only syncs relevant dirs
 - **Auto-install dependencies** — detects your package manager from lockfiles and installs if deps are missing
 - **Fuzzy TUI switching** — skim-powered fzf-style fuzzy finder to jump between worktrees
+- **Rich status dashboard** — `workz status` shows branch, dirty state, disk size, last commit age
 - **Docker support** — `--docker` flag to auto-start containers, auto-stop on `done`
-- **AI-agent ready** — launch Claude Code, Cursor, or VS Code in a worktree with `--ai`
+- **AI-agent ready** — launch Claude, Cursor, VS Code, Aider, Codex, Gemini, or Windsurf with `--ai`
+- **Sync existing worktrees** — `workz sync` applies full setup to worktrees not created by workz
 - **Shell integration** — `cd` into worktrees automatically, just like zoxide
 - **Global + project config** — `~/.config/workz/config.toml` for defaults, `.workz.toml` per project
 - **Zero config** — works out of the box for Node, Rust, Python, Go, and Java projects
@@ -126,10 +129,24 @@ cd ../my-existing-worktree
 workz sync                  # applies symlinks, copies .env files, installs deps
 ```
 
+### Rich status dashboard
+
+```bash
+workz status
+```
+
+```
+  main           /home/you/myrepo [modified]  342K  2 hours ago
+  feature-login  /home/you/myrepo--feature-login  1.2M  5 minutes ago  [docker]
+  bugfix-crash   /home/you/myrepo--bugfix-crash  890K  3 days ago
+```
+
 ### Clean up stale entries
 
 ```bash
-workz clean
+workz clean                        # prune stale worktree refs
+workz clean --merged               # also remove worktrees with merged branches
+workz clean --merged --base main   # specify base branch explicitly
 ```
 
 ## Configuration
@@ -164,13 +181,14 @@ Without a config file, workz uses sensible defaults that work for most projects.
 
 ### Default sync rules
 
-**Symlinked directories** (22 dirs, project-type aware):
+**Symlinked directories** (27 dirs, project-type aware):
 - **Node**: `node_modules`, `.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.parcel-cache`, `.angular`
 - **Rust**: `target`
 - **Python**: `.venv`, `venv`, `__pycache__`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`
 - **Go**: `vendor`
 - **Java/Kotlin**: `.gradle`, `build`
 - **General**: `.direnv`, `.cache`
+- **IDE configs**: `.vscode`, `.idea`, `.cursor`, `.claude`, `.zed`
 
 **Copied files** (17 patterns):
 - `.env`, `.env.*`, `.envrc`, `.tool-versions`, `.node-version`, `.python-version`, `.ruby-version`, `.nvmrc`, `.npmrc`, `.yarnrc.yml`, `docker-compose.override.yml`, `.secrets`, `.secrets.*`
@@ -206,9 +224,12 @@ Supports both `docker compose` and `podman-compose` (prefers podman if available
 Running multiple AI agents in parallel? Each one needs its own worktree:
 
 ```bash
-workz start feature/auth --ai                  # launches Claude Code
-workz start feature/ui --ai --ai-tool cursor    # launches Cursor
-workz start bugfix/perf --ai --ai-tool code     # launches VS Code
+workz start feature/auth --ai                       # launches Claude Code (default)
+workz start feature/ui --ai --ai-tool cursor         # launches Cursor
+workz start feature/api --ai --ai-tool aider         # launches Aider
+workz start feature/test --ai --ai-tool codex        # launches OpenAI Codex CLI
+workz start feature/x --ai --ai-tool gemini          # launches Gemini CLI
+workz start feature/y --ai --ai-tool windsurf        # launches Windsurf
 ```
 
 ## How It Compares
