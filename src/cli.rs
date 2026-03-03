@@ -38,6 +38,10 @@ pub enum Commands {
         /// Run docker/podman compose up in the new worktree
         #[arg(long)]
         docker: bool,
+
+        /// Auto-assign PORT, DB_NAME, COMPOSE_PROJECT_NAME and write .env.local
+        #[arg(long)]
+        isolated: bool,
     },
 
     /// List all worktrees with status
@@ -63,6 +67,10 @@ pub enum Commands {
         /// Also delete the branch after removal
         #[arg(short, long)]
         delete_branch: bool,
+
+        /// Drop the database created by --isolated
+        #[arg(long)]
+        cleanup_db: bool,
     },
 
     /// Sync symlinks, env files, and deps into the current worktree

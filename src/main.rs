@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod fleet;
 mod git;
+mod isolation;
 mod mcp;
 mod serve;
 mod sync;
@@ -28,14 +29,16 @@ fn main() -> Result<()> {
             ai,
             ai_tool,
             docker,
-        } => cmd_start(&branch, base.as_deref(), no_sync, ai, &ai_tool, docker),
+            isolated,
+        } => cmd_start(&branch, base.as_deref(), no_sync, ai, &ai_tool, docker, isolated),
         Commands::List => cmd_list(),
         Commands::Switch { query } => cmd_switch(query.as_deref()),
         Commands::Done {
             branch,
             force,
             delete_branch,
-        } => cmd_done(branch.as_deref(), force, delete_branch),
+            cleanup_db,
+        } => cmd_done(branch.as_deref(), force, delete_branch, cleanup_db),
         Commands::Sync => cmd_sync(),
         Commands::Status => cmd_status(),
         Commands::Clean { merged, base } => cmd_clean(merged, base.as_deref()),
@@ -68,6 +71,7 @@ fn cmd_start(
     ai: bool,
     ai_tool: &AiTool,
     docker: bool,
+    isolated: bool,
 ) -> Result<()> {
     let root = git::repo_root()?;
     let wt_path = git::worktree_path(&root, branch);
@@ -98,6 +102,15 @@ fn cmd_start(
                 eprintln!("  warning: post_start hook exited with {}", status);
             }
         }
+    }
+
+    if isolated {
+        let iso = isolation::setup_isolation(branch, &wt_path)?;
+        println!("  isolated environment:");
+        println!("    PORT={}                 → .env.local", iso.port);
+        println!("    DB_NAME={}", iso.db_name);
+        println!("    COMPOSE_PROJECT_NAME={}", iso.compose_project);
+        println!("    REDIS_URL=redis://localhost:{}", iso.port + 1000);
     }
 
     if docker {
@@ -319,7 +332,7 @@ fn cmd_switch(query: Option<&str>) -> Result<()> {
 
 // ── done ───────────────────────────────────────────────────────────────
 
-fn cmd_done(branch: Option<&str>, force: bool, delete_branch: bool) -> Result<()> {
+fn cmd_done(branch: Option<&str>, force: bool, delete_branch: bool, cleanup_db: bool) -> Result<()> {
     let root = git::repo_root()?;
 
     let (wt_path, branch_name) = if let Some(b) = branch {
@@ -345,6 +358,13 @@ fn cmd_done(branch: Option<&str>, force: bool, delete_branch: bool) -> Result<()
 
     // Stop containers if docker-compose exists
     stop_docker(&wt_path);
+
+    // Release isolated port allocation (no-op if not isolated)
+    let _ = isolation::release_isolation(&branch_name);
+
+    if cleanup_db {
+        isolation::drop_database(&branch_name);
+    }
 
     // Run pre_done hook if configured
     let config = config::load_config(&root)?;
@@ -443,13 +463,18 @@ fn cmd_status() -> Result<()> {
             || wt.path.join("compose.yaml").exists();
         let docker = if has_compose { "  [docker]" } else { "" };
 
+        let port_info = isolation::get_allocation(&wt.branch)
+            .map(|a| format!("  PORT:{}", a.port))
+            .unwrap_or_default();
+
         println!(
-            "  {:<width$}  {}{}  {}{}{}",
+            "  {:<width$}  {}{}  {}{}{}{}",
             wt.branch,
             wt.path.display(),
             dirty,
             size,
             last,
+            port_info,
             docker,
             width = max_branch,
         );
@@ -582,7 +607,8 @@ if [ -n "$ZSH_VERSION" ]; then
                     '--ai[Launch AI coding tool]' \
                     '-a[Launch AI coding tool]' \
                     '--ai-tool[AI tool]:tool:(claude cursor code)' \
-                    '--docker[Run docker compose up]'
+                    '--docker[Run docker compose up]' \
+                    '--isolated[Auto-assign PORT, DB_NAME, COMPOSE_PROJECT_NAME]'
                 ;;
             clean)
                 _arguments \
@@ -614,7 +640,7 @@ else
                 COMPREPLY=($(compgen -W "$(_workz_branches)" -- "$cur"))
                 ;;
             start)
-                COMPREPLY=($(compgen -W "--base --no-sync --ai --ai-tool --docker" -- "$cur"))
+                COMPREPLY=($(compgen -W "--base --no-sync --ai --ai-tool --docker --isolated" -- "$cur"))
                 if [[ "$prev" == "--ai-tool" ]]; then
                     COMPREPLY=($(compgen -W "claude cursor code aider codex gemini windsurf" -- "$cur"))
                 fi
@@ -668,6 +694,8 @@ complete -c workz -n "__fish_seen_subcommand_from start" -l no-sync -d "Skip syn
 complete -c workz -n "__fish_seen_subcommand_from start" -s a -l ai -d "Launch AI coding tool"
 complete -c workz -n "__fish_seen_subcommand_from start" -l ai-tool -a "claude cursor code aider codex gemini windsurf" -d "AI tool to launch"
 complete -c workz -n "__fish_seen_subcommand_from start" -l docker -d "Run docker compose up"
+complete -c workz -n "__fish_seen_subcommand_from start" -l isolated -d "Auto-assign PORT, DB_NAME, COMPOSE_PROJECT_NAME"
+complete -c workz -n "__fish_seen_subcommand_from done" -l cleanup-db -d "Drop the database created by --isolated"
 complete -c workz -n "__fish_seen_subcommand_from clean" -l merged -d "Remove worktrees with merged branches"
 complete -c workz -n "__fish_seen_subcommand_from clean" -l base -d "Base branch to check merged against"
 complete -c workz -n "__fish_seen_subcommand_from init" -a "zsh bash fish"

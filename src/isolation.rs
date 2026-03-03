@@ -1,0 +1,231 @@
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+// ── Registry types ───────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct PortRegistry {
+    #[serde(default = "default_base_port")]
+    pub base_port: u16,
+    #[serde(default)]
+    pub allocations: HashMap<String, PortAllocation>,
+}
+
+fn default_base_port() -> u16 {
+    3000
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PortAllocation {
+    pub port: u16,
+    pub branch: String,
+    pub db_name: String,
+    pub compose_project: String,
+    pub worktree_path: String,
+    pub allocated_at: String,
+}
+
+pub struct IsolationConfig {
+    pub port: u16,
+    pub db_name: String,
+    pub compose_project: String,
+}
+
+// ── Registry path ────────────────────────────────────────────────────────────
+
+pub fn registry_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("workz").join("ports.json"))
+}
+
+// ── Load / Save ──────────────────────────────────────────────────────────────
+
+pub fn load_registry() -> PortRegistry {
+    let Some(path) = registry_path() else {
+        return PortRegistry::default();
+    };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return PortRegistry::default();
+    };
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+pub fn save_registry(registry: &PortRegistry) -> Result<()> {
+    let Some(path) = registry_path() else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(registry)?)?;
+    Ok(())
+}
+
+// ── Branch slug ──────────────────────────────────────────────────────────────
+
+/// "feature/add-auth" → "feature_add_auth"
+pub fn branch_to_slug(branch: &str) -> String {
+    branch
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect::<String>()
+        .split('_')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+// ── Port allocation ──────────────────────────────────────────────────────────
+
+fn next_available_port(registry: &PortRegistry) -> u16 {
+    let used: std::collections::HashSet<u16> =
+        registry.allocations.values().map(|a| a.port).collect();
+    let base = if registry.base_port == 0 { 3000 } else { registry.base_port };
+    let mut port = base;
+    while used.contains(&port) {
+        port += 1;
+    }
+    port
+}
+
+// ── Main API ─────────────────────────────────────────────────────────────────
+
+/// Allocate a port, compute derived names, update registry, write .env.local.
+pub fn setup_isolation(branch: &str, wt_path: &Path) -> Result<IsolationConfig> {
+    let mut registry = load_registry();
+    let slug = branch_to_slug(branch);
+
+    let alloc = if let Some(existing) = registry.allocations.get(&slug) {
+        existing.clone()
+    } else {
+        let port = next_available_port(&registry);
+        let alloc = PortAllocation {
+            port,
+            branch: branch.to_string(),
+            db_name: slug.clone(),
+            compose_project: slug.clone(),
+            worktree_path: wt_path.to_string_lossy().to_string(),
+            allocated_at: rfc3339_now(),
+        };
+        registry.allocations.insert(slug.clone(), alloc.clone());
+        save_registry(&registry)?;
+        alloc
+    };
+
+    write_env_local(wt_path, &alloc)?;
+
+    Ok(IsolationConfig {
+        port: alloc.port,
+        db_name: alloc.db_name.clone(),
+        compose_project: alloc.compose_project.clone(),
+    })
+}
+
+/// Release a port allocation. Called by cmd_done.
+pub fn release_isolation(branch: &str) -> Result<()> {
+    let slug = branch_to_slug(branch);
+    let mut registry = load_registry();
+    if registry.allocations.remove(&slug).is_some() {
+        save_registry(&registry)?;
+    }
+    Ok(())
+}
+
+/// Best-effort: drop the PostgreSQL database for a branch.
+pub fn drop_database(branch: &str) {
+    let slug = branch_to_slug(branch);
+    let db_name = load_registry()
+        .allocations
+        .get(&slug)
+        .map(|a| a.db_name.clone())
+        .unwrap_or(slug);
+
+    match Command::new("dropdb").arg("--if-exists").arg(&db_name).status() {
+        Ok(s) if s.success() => println!("  dropped database '{}'", db_name),
+        Ok(s) => eprintln!("  warning: dropdb exited with {}", s),
+        Err(_) => eprintln!("  warning: dropdb not found, skipping DB cleanup"),
+    }
+}
+
+/// Look up the allocation for a branch (for status display).
+pub fn get_allocation(branch: &str) -> Option<PortAllocation> {
+    let slug = branch_to_slug(branch);
+    load_registry().allocations.get(&slug).cloned()
+}
+
+// ── .env.local writer ────────────────────────────────────────────────────────
+
+fn write_env_local(wt_path: &Path, alloc: &PortAllocation) -> Result<()> {
+    let content = format!(
+        "# Generated by workz --isolated — do not edit manually\n\
+         PORT={port}\n\
+         DB_NAME={db}\n\
+         DATABASE_URL=postgres://localhost/{db}\n\
+         COMPOSE_PROJECT_NAME={compose}\n\
+         REDIS_URL=redis://localhost:{redis}\n",
+        port    = alloc.port,
+        db      = alloc.db_name,
+        compose = alloc.compose_project,
+        redis   = alloc.port + 1000,
+    );
+    std::fs::write(wt_path.join(".env.local"), content)?;
+    Ok(())
+}
+
+// ── Timestamp helpers ────────────────────────────────────────────────────────
+
+fn rfc3339_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    unix_secs_to_rfc3339(secs)
+}
+
+/// Convert Unix seconds to an RFC 3339 UTC timestamp string.
+/// Uses Howard Hinnant's civil_from_days algorithm — no external crate needed.
+fn unix_secs_to_rfc3339(secs: u64) -> String {
+    let time_of_day = secs % 86400;
+    let hour = (time_of_day / 3600) as u32;
+    let min  = ((time_of_day % 3600) / 60) as u32;
+    let sec  = (time_of_day % 60) as u32;
+
+    let z: i64   = (secs / 86400) as i64 + 719468;
+    let era: i64 = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe: i64 = z - era * 146097;
+    let yoe: i64 = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y: i64   = yoe + era * 400;
+    let doy: i64 = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp: i64  = (5 * doy + 2) / 153;
+    let day: i64 = doy - (153 * mp + 2) / 5 + 1;
+    let month: i64 = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year: i64  = if month <= 2 { y + 1 } else { y };
+
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, hour, min, sec)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slug_basic() {
+        assert_eq!(branch_to_slug("feature/add-auth"), "feature_add_auth");
+        assert_eq!(branch_to_slug("fix/some-bug"), "fix_some_bug");
+        assert_eq!(branch_to_slug("main"), "main");
+    }
+
+    #[test]
+    fn timestamp_epoch() {
+        assert_eq!(unix_secs_to_rfc3339(0), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn timestamp_known() {
+        // 2024-03-04T12:00:00Z = 1709553600
+        assert_eq!(unix_secs_to_rfc3339(1709553600), "2024-03-04T12:00:00Z");
+    }
+}
