@@ -340,6 +340,3 @@ Once configured, Claude Code and other MCP-compatible agents can create and mana
 - Git 2.15+ (for worktree support)
 - A Unix-like system (Linux, macOS)
 
-## License
-
-MIT OR Apache-2.0
