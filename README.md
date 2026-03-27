@@ -301,7 +301,4 @@ workz done feature/api             # stops containers + removes worktree
 
 Supports both `docker compose` and `podman-compose`.
 
-## Requirements
 
-- Git 2.15+
-- Linux or macOS
