@@ -314,6 +314,11 @@ fn copy_files(
         let entries = glob::glob(pat_str).context("invalid glob pattern")?;
 
         for entry in entries.flatten() {
+            let rel_path = match entry.strip_prefix(source) {
+                Ok(p) => p.to_path_buf(),
+                Err(_) => continue,
+            };
+
             let file_name = match entry.file_name() {
                 Some(n) => n.to_string_lossy().to_string(),
                 None => continue,
@@ -323,20 +328,26 @@ fn copy_files(
                 continue;
             }
 
-            // Only copy regular files
             if !entry.is_file() {
                 continue;
             }
 
-            let dst = target.join(&file_name);
+            let dst = target.join(&rel_path);
             if dst.exists() {
                 continue;
             }
 
+            if let Some(parent) = dst.parent() {
+                if !parent.exists() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
+
+            let display_path = rel_path.display();
             if let Err(e) = std::fs::copy(&entry, &dst) {
-                eprintln!("  warning: could not copy {}: {}", file_name, e);
+                eprintln!("  warning: could not copy {}: {}", display_path, e);
             } else {
-                println!("  copied {}", file_name);
+                println!("  copied {}", display_path);
             }
         }
     }
@@ -368,4 +379,73 @@ fn create_symlink(src: &Path, dst: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    fn setup_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("workz_test_{}_{}", std::process::id(), id));
+        let source = base.join("source");
+        let target = base.join("target");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        (source, target)
+    }
+
+    #[test]
+    fn test_copy_files_flat() {
+        let (source, target) = setup_dirs();
+        fs::write(source.join(".env"), "SECRET=abc").unwrap();
+
+        copy_files(&source, &target, &[".env".into()], &[]).unwrap();
+
+        assert!(target.join(".env").exists());
+        assert_eq!(fs::read_to_string(target.join(".env")).unwrap(), "SECRET=abc");
+    }
+
+    #[test]
+    fn test_copy_files_nested() {
+        let (source, target) = setup_dirs();
+        fs::create_dir_all(source.join(".claude")).unwrap();
+        fs::write(source.join(".claude/settings.local.json"), r#"{"key":1}"#).unwrap();
+
+        copy_files(&source, &target, &[".claude/settings.local.json".into()], &[]).unwrap();
+
+        assert!(target.join(".claude/settings.local.json").exists());
+        assert_eq!(
+            fs::read_to_string(target.join(".claude/settings.local.json")).unwrap(),
+            r#"{"key":1}"#
+        );
+        assert!(!target.join("settings.local.json").exists());
+    }
+
+    #[test]
+    fn test_copy_files_ignore() {
+        let (source, target) = setup_dirs();
+        fs::write(source.join(".env"), "SECRET=abc").unwrap();
+        fs::write(source.join(".env.local"), "LOCAL=1").unwrap();
+
+        copy_files(&source, &target, &[".env*".into()], &[".env.local".into()]).unwrap();
+
+        assert!(target.join(".env").exists());
+        assert!(!target.join(".env.local").exists());
+    }
+
+    #[test]
+    fn test_copy_files_no_overwrite() {
+        let (source, target) = setup_dirs();
+        fs::write(source.join(".env"), "NEW").unwrap();
+        fs::write(target.join(".env"), "EXISTING").unwrap();
+
+        copy_files(&source, &target, &[".env".into()], &[]).unwrap();
+
+        assert_eq!(fs::read_to_string(target.join(".env")).unwrap(), "EXISTING");
+    }
 }
