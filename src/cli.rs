@@ -109,6 +109,9 @@ pub enum Commands {
         base: Option<String>,
     },
 
+    /// Show files modified in more than one worktree (conflicts before merge)
+    Conflicts,
+
     /// Diagnose broken symlinks, orphaned ports, and stale config
     Doctor {
         /// Apply safe repairs (release orphaned ports, remove dead symlinks, prune)

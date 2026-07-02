@@ -52,6 +52,7 @@ fn main() -> Result<()> {
         } => cmd_sync(path.as_deref(), isolated, json, quiet, no_install),
         Commands::Status => cmd_status(),
         Commands::Clean { merged, base } => cmd_clean(merged, base.as_deref()),
+        Commands::Conflicts => cmd_conflicts(),
         Commands::Doctor { fix } => {
             if doctor::run(fix)? {
                 Ok(())
@@ -583,6 +584,21 @@ fn cmd_status() -> Result<()> {
     Ok(())
 }
 
+// ── conflicts ──────────────────────────────────────────────────────────
+
+fn cmd_conflicts() -> Result<()> {
+    let conflicts = git::find_conflicts()?;
+    if conflicts.is_empty() {
+        println!("no files modified in more than one worktree");
+        return Ok(());
+    }
+    println!("files modified in multiple worktrees:");
+    for (file, branches) in &conflicts {
+        println!("  {}  —  {}", file, branches.join(", "));
+    }
+    Ok(())
+}
+
 // ── clean ──────────────────────────────────────────────────────────────
 
 fn cmd_clean(merged: bool, base: Option<&str>) -> Result<()> {
@@ -679,6 +695,9 @@ if [ -n "$ZSH_VERSION" ]; then
             'status:Show rich status of all worktrees'
             'done:Remove a worktree'
             'clean:Prune orphaned worktrees'
+            'conflicts:Show files modified in multiple worktrees'
+            'doctor:Diagnose broken symlinks, orphaned ports, stale config'
+            'hook:Print/install the worktree-hook recipe for a host'
             'mcp:Start the MCP server for AI agents'
             'shell-init:Print shell integration script'
         )
@@ -729,7 +748,7 @@ else
         prev="${COMP_WORDS[COMP_CWORD-1]}"
 
         if [[ ${COMP_CWORD} -eq 1 ]]; then
-            COMPREPLY=($(compgen -W "start list ls switch s sync status done clean mcp shell-init" -- "$cur"))
+            COMPREPLY=($(compgen -W "start list ls switch s sync status done clean conflicts doctor hook mcp shell-init" -- "$cur"))
             return
         fi
 
@@ -780,15 +799,21 @@ end
 
 # Tab completions
 complete -c workz -e
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a start -d "Create a new worktree"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a list -d "List all worktrees"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a switch -d "Fuzzy-switch to a worktree"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a sync -d "Sync symlinks, env files, and deps"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a status -d "Show rich status of all worktrees"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a done -d "Remove a worktree"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a clean -d "Prune orphaned worktrees"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a mcp -d "Start the MCP server for AI agents"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a shell-init -d "Print shell integration script"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a start -d "Create a new worktree"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a list -d "List all worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a switch -d "Fuzzy-switch to a worktree"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a sync -d "Sync symlinks, env files, and deps"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a status -d "Show rich status of all worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a done -d "Remove a worktree"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a clean -d "Prune orphaned worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a conflicts -d "Show files modified in multiple worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a doctor -d "Diagnose broken symlinks, orphaned ports, stale config"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a hook -d "Print/install the worktree-hook recipe for a host"
+complete -c workz -n "__fish_seen_subcommand_from hook" -a "claude cursor codex conductor worktrunk generic"
+complete -c workz -n "__fish_seen_subcommand_from hook" -l install -d "Write the config file (never overwrites)"
+complete -c workz -n "__fish_seen_subcommand_from doctor" -l fix -d "Apply safe repairs"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a mcp -d "Start the MCP server for AI agents"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a shell-init -d "Print shell integration script"
 complete -c workz -n "__fish_seen_subcommand_from switch s" -a "(git worktree list --porcelain 2>/dev/null | string match -r '^branch refs/heads/(.+)' | string replace 'branch refs/heads/' '')"
 complete -c workz -n "__fish_seen_subcommand_from done" -a "(git worktree list --porcelain 2>/dev/null | string match -r '^branch refs/heads/(.+)' | string replace 'branch refs/heads/' '')"
 complete -c workz -n "__fish_seen_subcommand_from start" -l base -d "Base branch"

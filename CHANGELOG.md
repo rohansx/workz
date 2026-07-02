@@ -6,6 +6,8 @@ All notable changes to workz are documented here. This project adheres to
 ## [0.10.0] — unreleased ("The Hook Release")
 
 ### Added
+- **`workz conflicts`** — show files modified in more than one worktree (potential merge
+  conflicts before they happen), promoted from MCP-only to a first-class CLI command.
 - **`workz hook <host>`** — print (or `--install`) the worktree-create hook recipe that
   wires `workz sync --isolated` into a host tool: `claude`, `cursor`, `codex`,
   `conductor`, `worktrunk`, or `generic`. `--install` writes the dedicated config file
@@ -24,6 +26,10 @@ All notable changes to workz are documented here. This project adheres to
     that break on symlinked node_modules (Vite / Vitest / pnpm monorepos).
 
 ### Fixed
+- **First filename character dropped in `modified_files`.** `git()` trimmed the porcelain
+  output, stripping the leading space of the first status line so the first changed file
+  showed as `hared.txt` instead of `shared.txt`. Affected `workz conflicts` and the MCP
+  `workz_conflicts` tool. Now reads untrimmed stdout; covered by a regression test.
 - **Global/project config merge.** Project `.workz.toml` now overrides global config
   per key. Previously, a project that customized any sync value silently discarded the
   global sync config (and vice-versa) due to an equality-to-default check.
