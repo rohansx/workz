@@ -25,6 +25,13 @@ All notable changes to workz are documented here. This project adheres to
     `node_modules = "copy"` physically copies the directory — the escape hatch for tools
     that break on symlinked node_modules (Vite / Vitest / pnpm monorepos).
 
+### Changed
+- **`DATABASE_URL` under `--isolated` is now derived from your existing one.** If your
+  copied `.env`/`.env.local` already has a `DATABASE_URL`, workz keeps its driver, host,
+  port, credentials, and query string and only swaps the database name
+  (`…@rds.example.com:5432/prod` → `…@rds.example.com:5432/feat_x`). Falls back to
+  `postgres://localhost/<db>` when there's no existing URL.
+
 ### Fixed
 - **First filename character dropped in `modified_files`.** `git()` trimmed the porcelain
   output, stripping the leading space of the first status line so the first changed file
