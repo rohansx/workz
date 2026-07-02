@@ -122,6 +122,7 @@ workz shell-init fish | source
 | `workz list` | List worktrees with size and status (aliased `ls`) |
 | `workz done [branch]` | Remove a worktree (`--force`, `--delete-branch`, `--cleanup-db`) |
 | `workz clean` | Prune stale worktrees (`--merged` also removes merged branches) |
+| `workz doctor` | Diagnose broken symlinks, orphaned ports, stale config (`--fix` repairs) |
 | `workz mcp` | Run the MCP server (see below) |
 | `workz shell-init <shell>` | Print shell integration for zsh/bash/fish |
 

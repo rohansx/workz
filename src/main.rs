@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod doctor;
 mod git;
 mod isolation;
 mod mcp;
@@ -50,6 +51,13 @@ fn main() -> Result<()> {
         } => cmd_sync(path.as_deref(), isolated, json, quiet, no_install),
         Commands::Status => cmd_status(),
         Commands::Clean { merged, base } => cmd_clean(merged, base.as_deref()),
+        Commands::Doctor { fix } => {
+            if doctor::run(fix)? {
+                Ok(())
+            } else {
+                std::process::exit(1);
+            }
+        }
         Commands::Mcp => mcp::run(),
         Commands::ShellInit { shell } => cmd_init(&shell),
     }

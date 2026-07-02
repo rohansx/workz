@@ -6,6 +6,11 @@ All notable changes to workz are documented here. This project adheres to
 ## [0.10.0] — unreleased ("The Hook Release")
 
 ### Added
+- **`workz doctor`** — diagnose the things that quietly break worktree setups:
+  dangling symlinks inside worktrees, orphaned port allocations (worktree gone),
+  stale worktree refs, and unparseable `.workz.toml` / global config. Exit code 1 when
+  problems are found (CI-friendly). `workz doctor --fix` applies the safe repairs:
+  release orphaned ports, remove dead symlinks, prune stale worktrees.
 - **Config v2 — additive keys and per-directory strategies.**
   - `symlink_add` / `copy_add` / `ignore_add` extend the built-in defaults instead of
     replacing them (the bare `symlink` / `copy` / `ignore` keys still replace).

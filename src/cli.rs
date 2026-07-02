@@ -109,6 +109,13 @@ pub enum Commands {
         base: Option<String>,
     },
 
+    /// Diagnose broken symlinks, orphaned ports, and stale config
+    Doctor {
+        /// Apply safe repairs (release orphaned ports, remove dead symlinks, prune)
+        #[arg(long)]
+        fix: bool,
+    },
+
     /// Start an MCP server exposing workz tools to AI agents (stdio transport)
     Mcp,
 
