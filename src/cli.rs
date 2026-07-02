@@ -42,6 +42,14 @@ pub enum Commands {
         /// Auto-assign PORT, DB_NAME, COMPOSE_PROJECT_NAME and write .env.local
         #[arg(long)]
         isolated: bool,
+
+        /// With --isolated, actually create the Postgres database (runs createdb)
+        #[arg(long)]
+        create_db: bool,
+
+        /// Clone the created database from this template (implies --create-db)
+        #[arg(long, value_name = "DB")]
+        from_db: Option<String>,
     },
 
     /// List all worktrees with status
@@ -93,6 +101,14 @@ pub enum Commands {
         /// Skip dependency auto-install (symlink + copy only)
         #[arg(long)]
         no_install: bool,
+
+        /// With --isolated, actually create the Postgres database (runs createdb)
+        #[arg(long)]
+        create_db: bool,
+
+        /// Clone the created database from this template (implies --create-db)
+        #[arg(long, value_name = "DB")]
+        from_db: Option<String>,
     },
 
     /// Show rich status of all worktrees

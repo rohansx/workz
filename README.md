@@ -171,6 +171,11 @@ Re-running `--isolated` only rewrites the managed block. Port ranges are tracked
 web frameworks and writes their port var (`VITE_PORT`, `SERVER_PORT`, `FLASK_RUN_PORT`,
 `UVICORN_PORT`, …).
 
+If your `.env` already has a `DATABASE_URL`, workz keeps its driver, host, port, and
+credentials and only swaps the database name. Add `--create-db` to actually create the
+Postgres database (`createdb`), or `--create-db --from-db dev` to clone it from an
+existing one. `workz done --cleanup-db` drops it.
+
 ## What gets synced
 
 **Symlinked** (project-type aware — only what's relevant is linked):

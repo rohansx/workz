@@ -35,7 +35,19 @@ fn main() -> Result<()> {
             ai_tool,
             docker,
             isolated,
-        } => cmd_start(&branch, base.as_deref(), no_sync, ai, &ai_tool, docker, isolated),
+            create_db,
+            from_db,
+        } => cmd_start(
+            &branch,
+            base.as_deref(),
+            no_sync,
+            ai,
+            &ai_tool,
+            docker,
+            isolated,
+            create_db,
+            from_db.as_deref(),
+        ),
         Commands::List => cmd_list(),
         Commands::Switch { query } => cmd_switch(query.as_deref()),
         Commands::Done {
@@ -50,7 +62,17 @@ fn main() -> Result<()> {
             json,
             quiet,
             no_install,
-        } => cmd_sync(path.as_deref(), isolated, json, quiet, no_install),
+            create_db,
+            from_db,
+        } => cmd_sync(
+            path.as_deref(),
+            isolated,
+            json,
+            quiet,
+            no_install,
+            create_db,
+            from_db.as_deref(),
+        ),
         Commands::Status => cmd_status(),
         Commands::Clean { merged, base } => cmd_clean(merged, base.as_deref()),
         Commands::Conflicts => cmd_conflicts(),
@@ -89,6 +111,7 @@ fn main() -> Result<()> {
 
 // ── start ──────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_start(
     branch: &str,
     base: Option<&str>,
@@ -97,6 +120,8 @@ fn cmd_start(
     ai_tool: &AiTool,
     docker: bool,
     isolated: bool,
+    create_db: bool,
+    from_db: Option<&str>,
 ) -> Result<()> {
     let root = git::repo_root()?;
     let wt_path = git::worktree_path(&root, branch);
@@ -156,6 +181,11 @@ fn cmd_start(
         if framework != sync::Framework::Unknown {
             println!("    framework={:?}", framework);
         }
+        if create_db || from_db.is_some() {
+            isolation::create_database(&iso.db_name, from_db);
+        }
+    } else if create_db || from_db.is_some() {
+        eprintln!("  note: --create-db requires --isolated (skipping)");
     }
 
     if docker {
@@ -463,12 +493,15 @@ fn stop_docker(path: &std::path::Path) {
 
 // ── sync ───────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_sync(
     path: Option<&std::path::Path>,
     isolated: bool,
     json: bool,
     quiet: bool,
     no_install: bool,
+    create_db: bool,
+    from_db: Option<&str>,
 ) -> Result<()> {
     let root = git::repo_root()?;
     let target = match path {
@@ -499,6 +532,17 @@ fn cmd_sync(
     } else {
         None
     };
+
+    // Optionally create the Postgres database (status → stderr, JSON-safe).
+    match &iso {
+        Some(i) if create_db || from_db.is_some() => {
+            isolation::create_database(&i.db_name, from_db);
+        }
+        None if create_db || from_db.is_some() => {
+            eprintln!("note: --create-db requires --isolated (skipping)");
+        }
+        _ => {}
+    }
 
     if json {
         let iso_json = match &iso {
@@ -782,7 +826,7 @@ else
                 COMPREPLY=($(compgen -W "$(_workz_branches)" -- "$cur"))
                 ;;
             start)
-                COMPREPLY=($(compgen -W "--base --no-sync --ai --ai-tool --docker --isolated" -- "$cur"))
+                COMPREPLY=($(compgen -W "--base --no-sync --ai --ai-tool --docker --isolated --create-db --from-db" -- "$cur"))
                 if [[ "$prev" == "--ai-tool" ]]; then
                     COMPREPLY=($(compgen -W "claude cursor code aider codex gemini windsurf" -- "$cur"))
                 fi
@@ -846,6 +890,8 @@ complete -c workz -n "__fish_seen_subcommand_from start" -s a -l ai -d "Launch A
 complete -c workz -n "__fish_seen_subcommand_from start" -l ai-tool -a "claude cursor code aider codex gemini windsurf" -d "AI tool to launch"
 complete -c workz -n "__fish_seen_subcommand_from start" -l docker -d "Run docker compose up"
 complete -c workz -n "__fish_seen_subcommand_from start" -l isolated -d "Auto-assign PORT, DB_NAME, COMPOSE_PROJECT_NAME"
+complete -c workz -n "__fish_seen_subcommand_from start" -l create-db -d "Create the Postgres database (with --isolated)"
+complete -c workz -n "__fish_seen_subcommand_from start" -l from-db -d "Clone the created database from this template"
 complete -c workz -n "__fish_seen_subcommand_from done" -l cleanup-db -d "Drop the database created by --isolated"
 complete -c workz -n "__fish_seen_subcommand_from clean" -l merged -d "Remove worktrees with merged branches"
 complete -c workz -n "__fish_seen_subcommand_from clean" -l base -d "Base branch to check merged against"
