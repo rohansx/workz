@@ -53,6 +53,9 @@ All notable changes to workz are documented here. This project adheres to
     that break on symlinked node_modules (Vite / Vitest / pnpm monorepos).
 
 ### Changed
+- **Port allocation now skips ports that are actually in use.** In addition to avoiding
+  ranges tracked in `ports.json`, workz bind-checks a candidate's base port and moves to
+  the next range if some other (non-workz) process already holds it.
 - **`DATABASE_URL` under `--isolated` is now derived from your existing one.** If your
   copied `.env`/`.env.local` already has a `DATABASE_URL`, workz keeps its driver, host,
   port, credentials, and query string and only swaps the database name
