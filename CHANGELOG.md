@@ -6,6 +6,10 @@ All notable changes to workz are documented here. This project adheres to
 ## [0.11.0] — unreleased ("The Wizard")
 
 ### Added
+- **`--create-db` / `--from-db`** on `workz start` and `workz sync`. With `--isolated`,
+  workz can now actually create the per-worktree Postgres database (via `createdb`), and
+  `--from-db <template>` clones it from an existing database. Pairs with the existing
+  `workz done --cleanup-db`. Status goes to stderr so `--json` output stays clean.
 - **`workz init`** — a short setup wizard. It detects the project (language, package
   manager, framework, docker-compose, monorepo), asks a few skippable questions, writes a
   minimal `.workz.toml` (only your deviations from the zero-config defaults), and can

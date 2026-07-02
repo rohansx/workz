@@ -173,6 +173,38 @@ pub fn release_isolation(branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Build the argument list for `createdb` (pure — unit-testable).
+/// `-T <template>` clones an existing database when `from_db` is set.
+fn createdb_args(db_name: &str, from_db: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(template) = from_db {
+        args.push("-T".to_string());
+        args.push(template.to_string());
+    }
+    args.push(db_name.to_string());
+    args
+}
+
+/// Best-effort: create the PostgreSQL database for an isolated worktree
+/// (`--create-db`). Optionally clones from a template db (`--from-db`).
+/// Connection is taken from the standard libpq environment (PGHOST, PGPORT, …).
+pub fn create_database(db_name: &str, from_db: Option<&str>) {
+    // Status goes to stderr so it never pollutes `workz sync --json` stdout.
+    let args = createdb_args(db_name, from_db);
+    match Command::new("createdb").args(&args).status() {
+        Ok(s) if s.success() => {
+            let via = from_db
+                .map(|t| format!(" (from template '{t}')"))
+                .unwrap_or_default();
+            eprintln!("  created database '{db_name}'{via}");
+        }
+        // createdb has no --if-exists; a non-zero exit usually means it already
+        // exists. Non-fatal — this is an opt-in convenience.
+        Ok(_) => eprintln!("  database '{db_name}' already exists or could not be created (skipping)"),
+        Err(_) => eprintln!("  warning: createdb not found, skipping DB creation"),
+    }
+}
+
 /// Best-effort: drop the PostgreSQL database for a branch.
 pub fn drop_database(branch: &str) {
     let slug = branch_to_slug(branch);
@@ -573,6 +605,15 @@ mod tests {
         // No db path to swap → None (caller keeps the default).
         assert_eq!(swap_db_in_url("postgres://localhost", "feat_x"), None);
         assert_eq!(swap_db_in_url("not a url", "feat_x"), None);
+    }
+
+    #[test]
+    fn createdb_args_plain_and_template() {
+        assert_eq!(createdb_args("feat_x", None), vec!["feat_x".to_string()]);
+        assert_eq!(
+            createdb_args("feat_x", Some("dev")),
+            vec!["-T".to_string(), "dev".to_string(), "feat_x".to_string()]
+        );
     }
 
     #[test]
