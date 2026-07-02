@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/hero.png" alt="workz — the environment engine for agent worktrees" width="860">
+  <img src="https://raw.githubusercontent.com/rohansx/workz/main/.github/hero.png" alt="workz — the environment engine for agent worktrees" width="860">
 </p>
 
 <p align="center">
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="demo.gif" alt="workz demo" width="820">
+  <img src="https://raw.githubusercontent.com/rohansx/workz/main/demo.gif" alt="workz demo" width="820">
 </p>
 
 ---
