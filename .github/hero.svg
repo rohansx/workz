@@ -1,68 +1,67 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380" width="1200" height="380" font-family="'DejaVu Sans','Segoe UI',ui-sans-serif,sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380" width="1200" height="380">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#1e1e2e"/>
-      <stop offset="1" stop-color="#11111b"/>
-    </linearGradient>
-    <linearGradient id="word" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#cba6f7"/>
-      <stop offset="0.55" stop-color="#89b4fa"/>
-      <stop offset="1" stop-color="#94e2d5"/>
-    </linearGradient>
+    <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
+      <path d="M30 0 H0 V30" fill="none" stroke="#26273a" stroke-width="1"/>
+    </pattern>
   </defs>
 
-  <rect x="0" y="0" width="1200" height="380" rx="20" fill="url(#bg)"/>
-  <rect x="1" y="1" width="1198" height="378" rx="19" fill="none" stroke="#313244" stroke-width="2"/>
+  <rect x="0" y="0" width="1200" height="380" rx="16" fill="#171622"/>
+  <rect x="0" y="0" width="1200" height="380" rx="16" fill="url(#grid)"/>
+  <rect x="0.5" y="0.5" width="1199" height="379" rx="15.5" fill="none" stroke="#2e3048" stroke-width="1"/>
 
-  <!-- left: wordmark + tagline + pills -->
-  <text x="64" y="132" font-size="82" font-weight="700" fill="url(#word)" letter-spacing="-2">workz</text>
-  <text x="68" y="178" font-size="23" font-weight="600" fill="#cdd6f4">The environment engine for agent worktrees</text>
-  <text x="68" y="212" font-size="17" fill="#9399b2">Your agent creates the worktree — workz makes it run.</text>
-
-  <!-- pills -->
-  <g font-size="16" font-weight="600">
-    <rect x="66" y="250" width="196" height="40" rx="20" fill="#313244"/>
-    <circle cx="90" cy="270" r="5" fill="#a6e3a1"/>
-    <text x="104" y="276" fill="#bac2de">zero-config deps</text>
-
-    <rect x="274" y="250" width="308" height="40" rx="20" fill="#313244"/>
-    <circle cx="298" cy="270" r="5" fill="#89b4fa"/>
-    <text x="312" y="276" fill="#bac2de">port · db · compose isolation</text>
-
-    <rect x="594" y="250" width="214" height="40" rx="20" fill="#313244"/>
-    <circle cx="618" cy="270" r="5" fill="#f5c2e7"/>
-    <text x="632" y="276" fill="#bac2de">one hook, any agent</text>
+  <!-- wordmark: solid, monospace (CLI synergy), with a terminal cursor -->
+  <g font-family="'DejaVu Sans Mono','Menlo','Consolas',monospace">
+    <text x="60" y="130" font-size="74" font-weight="700" fill="#e6e6f0" letter-spacing="-1">workz</text>
+    <rect x="292" y="82" width="30" height="52" fill="#8aa9f0"/>
   </g>
 
-  <text x="68" y="336" font-size="15" fill="#6c7086" font-family="'DejaVu Sans Mono',monospace">$ workz start feature/checkout --isolated</text>
+  <text x="62" y="176" font-size="22" font-weight="600" fill="#c8cbe0" font-family="'DejaVu Sans','Segoe UI',sans-serif">The environment engine for agent worktrees</text>
+  <text x="62" y="208" font-size="16" fill="#8b8fa8" font-family="'DejaVu Sans','Segoe UI',sans-serif">Your agent creates the worktree — workz makes it run.</text>
 
-  <!-- right: worktree isolation diagram -->
-  <g transform="translate(720,54)">
-    <!-- main repo node -->
-    <rect x="70" y="0" width="200" height="46" rx="10" fill="#181825" stroke="#45475a" stroke-width="1.5"/>
-    <text x="170" y="22" font-size="15" font-weight="700" fill="#cdd6f4" text-anchor="middle">main repo</text>
-    <text x="170" y="38" font-size="12" fill="#6c7086" text-anchor="middle" font-family="'DejaVu Sans Mono',monospace">node_modules · .env · db</text>
+  <!-- minimal outlined pills -->
+  <g font-size="15" font-family="'DejaVu Sans Mono',monospace">
+    <rect x="62" y="248" width="176" height="38" rx="6" fill="none" stroke="#3a3c56" stroke-width="1.5"/>
+    <rect cx="0" x="80" y="263" width="8" height="8" fill="#8ad0a0"/>
+    <text x="98" y="272" fill="#b4b7cf">zero-config deps</text>
+
+    <rect x="250" y="248" width="290" height="38" rx="6" fill="none" stroke="#3a3c56" stroke-width="1.5"/>
+    <rect x="268" y="263" width="8" height="8" fill="#8aa9f0"/>
+    <text x="286" y="272" fill="#b4b7cf">port · db · compose isolation</text>
+
+    <rect x="552" y="248" width="196" height="38" rx="6" fill="none" stroke="#3a3c56" stroke-width="1.5"/>
+    <rect x="570" y="263" width="8" height="8" fill="#c9a2ea"/>
+    <text x="588" y="272" fill="#b4b7cf">one hook, any agent</text>
+  </g>
+
+  <text x="62" y="336" font-size="15" fill="#5a5c78" font-family="'DejaVu Sans Mono',monospace">$ workz start feature/checkout --isolated</text>
+
+  <!-- right: worktree isolation diagram (the synergy) -->
+  <g transform="translate(724,52)" font-family="'DejaVu Sans Mono',monospace">
+    <!-- main repo -->
+    <rect x="72" y="0" width="196" height="46" rx="6" fill="#1e1d2e" stroke="#4a4c68" stroke-width="1.5"/>
+    <text x="170" y="21" font-size="14" font-weight="700" fill="#e6e6f0" text-anchor="middle">main repo</text>
+    <text x="170" y="37" font-size="11.5" fill="#6a6d88" text-anchor="middle">node_modules · .env · db</text>
 
     <!-- connectors -->
-    <path d="M170 46 V78 M60 78 H280 M60 78 V96 M170 78 V96 M280 78 V96" fill="none" stroke="#45475a" stroke-width="1.5"/>
+    <path d="M170 46 V76 M60 76 H280 M60 76 V96 M170 76 V96 M280 76 V96" fill="none" stroke="#3a3c56" stroke-width="1.5"/>
 
-    <!-- three isolated worktrees -->
-    <g font-family="'DejaVu Sans Mono',monospace">
-      <rect x="-6" y="96" width="132" height="76" rx="10" fill="#181825" stroke="#89b4fa" stroke-width="1.5"/>
-      <text x="60" y="120" font-size="13" font-weight="700" fill="#89b4fa" text-anchor="middle">feature/auth</text>
-      <text x="60" y="142" font-size="12" fill="#a6adc8" text-anchor="middle">:3000-3009</text>
-      <text x="60" y="160" font-size="12" fill="#a6adc8" text-anchor="middle">db · auth</text>
+    <!-- isolated worktrees -->
+    <g>
+      <rect x="-6" y="96" width="132" height="78" rx="6" fill="#1e1d2e" stroke="#8aa9f0" stroke-width="1.5"/>
+      <text x="60" y="121" font-size="13" font-weight="700" fill="#8aa9f0" text-anchor="middle">feature/auth</text>
+      <text x="60" y="143" font-size="12" fill="#9a9db6" text-anchor="middle">:3000-3009</text>
+      <text x="60" y="161" font-size="12" fill="#9a9db6" text-anchor="middle">db · auth</text>
 
-      <rect x="138" y="96" width="132" height="76" rx="10" fill="#181825" stroke="#a6e3a1" stroke-width="1.5"/>
-      <text x="204" y="120" font-size="13" font-weight="700" fill="#a6e3a1" text-anchor="middle">feature/api</text>
-      <text x="204" y="142" font-size="12" fill="#a6adc8" text-anchor="middle">:3010-3019</text>
-      <text x="204" y="160" font-size="12" fill="#a6adc8" text-anchor="middle">db · api</text>
+      <rect x="138" y="96" width="132" height="78" rx="6" fill="#1e1d2e" stroke="#8ad0a0" stroke-width="1.5"/>
+      <text x="204" y="121" font-size="13" font-weight="700" fill="#8ad0a0" text-anchor="middle">feature/api</text>
+      <text x="204" y="143" font-size="12" fill="#9a9db6" text-anchor="middle">:3010-3019</text>
+      <text x="204" y="161" font-size="12" fill="#9a9db6" text-anchor="middle">db · api</text>
 
-      <rect x="282" y="96" width="132" height="76" rx="10" fill="#181825" stroke="#fab387" stroke-width="1.5"/>
-      <text x="348" y="120" font-size="13" font-weight="700" fill="#fab387" text-anchor="middle">feature/ui</text>
-      <text x="348" y="142" font-size="12" fill="#a6adc8" text-anchor="middle">:3020-3029</text>
-      <text x="348" y="160" font-size="12" fill="#a6adc8" text-anchor="middle">db · ui</text>
+      <rect x="282" y="96" width="132" height="78" rx="6" fill="#1e1d2e" stroke="#e0b080" stroke-width="1.5"/>
+      <text x="348" y="121" font-size="13" font-weight="700" fill="#e0b080" text-anchor="middle">feature/ui</text>
+      <text x="348" y="143" font-size="12" fill="#9a9db6" text-anchor="middle">:3020-3029</text>
+      <text x="348" y="161" font-size="12" fill="#9a9db6" text-anchor="middle">db · ui</text>
     </g>
-    <text x="204" y="196" font-size="12.5" fill="#6c7086" text-anchor="middle">no collisions · run all three at once</text>
+    <text x="204" y="198" font-size="12" fill="#6a6d88" text-anchor="middle">no collisions · run all three at once</text>
   </g>
 </svg>
