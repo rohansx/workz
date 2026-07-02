@@ -35,9 +35,8 @@ Every one of those tools ships a *worktree-create hook* and tells you to write t
 ## Quickstart
 
 ```bash
-# 1. install (latest — from source)
-cargo install --git https://github.com/rohansx/workz
-# packaged releases: `cargo install workz` · `brew install rohansx/tap/workz`
+# 1. install
+cargo install workz          # or: brew install rohansx/tap/workz
 
 # 2. in your repo — guided setup (detects your stack, writes .workz.toml)
 workz init
