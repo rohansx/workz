@@ -32,7 +32,8 @@ workz sync --isolated
 ```
 
 Use it standalone, or wire it into your agent's hook so every new worktree is runnable
-the moment it exists.
+the moment it exists. New to a repo? `workz init` walks you through setup and can install
+the hook for you.
 
 ## Use it as a hook
 
@@ -123,6 +124,7 @@ workz shell-init fish | source
 
 | Command | Does |
 |---------|------|
+| `workz init` | Guided setup: detect the stack, write `.workz.toml`, install a hook (`-y` for defaults) |
 | `workz` / `workz status` | Status of every worktree: branch, dirty state, size, port range |
 | `workz start <branch>` | Create a worktree + sync (`--isolated`, `--docker`, `--ai`, `--base`, `--no-sync`) |
 | `workz sync [path]` | Make a worktree runnable — the hook command (`--isolated`, `--json`, `--quiet`, `--no-install`) |

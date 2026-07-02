@@ -133,8 +133,19 @@ pub enum Commands {
     /// Start an MCP server exposing workz tools to AI agents (stdio transport)
     Mcp,
 
+    /// Set up workz for this project (interactive wizard; -y for defaults)
+    Init {
+        /// Run non-interactively with detected defaults
+        #[arg(short = 'y', long)]
+        yes: bool,
+
+        /// Deprecated: `workz init <shell>` — use `workz shell-init <shell>`
+        #[arg(hide = true)]
+        shell: Option<String>,
+    },
+
     /// Print shell integration script (add: eval "$(workz shell-init zsh)")
-    #[command(name = "shell-init", alias = "init")]
+    #[command(name = "shell-init")]
     ShellInit {
         /// Shell to generate integration for
         #[arg(value_enum)]
@@ -150,7 +161,7 @@ pub enum Shell {
 }
 
 /// Host tools workz can generate a worktree-create hook recipe for.
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum HookHost {
     Claude,
     Cursor,

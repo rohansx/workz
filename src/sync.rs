@@ -95,6 +95,66 @@ pub fn sync_worktree(
     Ok(report)
 }
 
+/// A human-facing summary of what workz detected in a repo — used by `workz init`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ProjectSummary {
+    pub languages: Vec<String>,
+    pub install_cmd: Option<String>,
+    pub framework: Option<String>,
+    pub has_docker: bool,
+    pub is_monorepo: bool,
+}
+
+/// Detect the project ecosystem for the setup wizard.
+pub fn detect_summary(root: &Path) -> ProjectSummary {
+    let p = detect_project(root);
+
+    let mut languages = Vec::new();
+    if p.has_node {
+        languages.push("Node.js".to_string());
+    }
+    if p.has_rust {
+        languages.push("Rust".to_string());
+    }
+    if p.has_python {
+        languages.push("Python".to_string());
+    }
+    if p.has_go {
+        languages.push("Go".to_string());
+    }
+    if p.has_java {
+        languages.push("Java/Kotlin".to_string());
+    }
+
+    let install_cmd = p
+        .node_install_cmd
+        .as_ref()
+        .or(p.python_install_cmd.as_ref())
+        .map(|c| c.join(" "));
+
+    let framework = match p.framework {
+        Framework::Unknown => None,
+        f => Some(format!("{f:?}")),
+    };
+
+    let has_docker = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]
+        .iter()
+        .any(|f| root.join(f).exists());
+
+    let is_monorepo = root.join("pnpm-workspace.yaml").exists()
+        || root.join("lerna.json").exists()
+        || std::fs::read_to_string(root.join("Cargo.toml"))
+            .map(|c| c.contains("[workspace]"))
+            .unwrap_or(false);
+
+    ProjectSummary { languages, install_cmd, framework, has_docker, is_monorepo }
+}
+
+/// Whether a heavy dir is relevant to this project (exposed for `workz init`).
+pub fn node_project(root: &Path) -> bool {
+    detect_project(root).has_node
+}
+
 /// Detected project types (a repo can be multiple, e.g. Node + Python monorepo).
 #[derive(Default)]
 struct ProjectInfo {
