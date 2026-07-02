@@ -236,12 +236,51 @@ const MANAGED_END: &str = "# <<< workz managed <<<";
 /// `.env.local` full of secrets) is preserved; only the workz-managed block is
 /// rewritten. Idempotent: running twice with the same allocation is a no-op.
 fn write_env_local(wt_path: &Path, alloc: &PortAllocation, framework: Framework) -> Result<()> {
-    let managed = build_managed_block(alloc, framework);
     let path = wt_path.join(".env.local");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let merged = merge_managed_block(&existing, &managed);
+    let user_lines = extract_user_lines(&existing);
+
+    let mut managed = build_managed_block(alloc, framework);
+
+    // Derive DATABASE_URL from the user's existing one (keeps their driver,
+    // host, port, credentials, and query — only the db name changes).
+    if let Some(url) = derive_database_url(&user_lines, &alloc.db_name) {
+        for line in managed.iter_mut() {
+            if line.starts_with("DATABASE_URL=") {
+                *line = format!("DATABASE_URL={url}");
+            }
+        }
+    }
+
+    let merged = assemble(&user_lines, &managed);
     std::fs::write(path, merged)?;
     Ok(())
+}
+
+/// Derive a per-worktree DATABASE_URL from a user-provided one by swapping the
+/// database name. Returns `None` if there's no usable user URL (keep the default).
+fn derive_database_url(user_lines: &[String], db_name: &str) -> Option<String> {
+    for line in user_lines {
+        if let Some(val) = line.trim().strip_prefix("DATABASE_URL=") {
+            return swap_db_in_url(val.trim(), db_name);
+        }
+    }
+    None
+}
+
+/// Replace the database name (the path segment after the last `/`) in a
+/// connection URL, preserving scheme, credentials, host, port, and query string.
+fn swap_db_in_url(url: &str, db_name: &str) -> Option<String> {
+    // Split off any ?query / #fragment.
+    let (base, suffix) = match url.find(['?', '#']) {
+        Some(i) => (&url[..i], &url[i..]),
+        None => (url, ""),
+    };
+    let scheme_end = base.find("://")? + 3;
+    let after = &base[scheme_end..];
+    let slash = after.rfind('/')?; // separates host[:port][/path] from the db name
+    let host_part = &base[..scheme_end + slash];
+    Some(format!("{host_part}/{db_name}{suffix}"))
 }
 
 /// The lines that live *inside* the managed block (no markers, no trailing newline).
@@ -279,23 +318,34 @@ fn build_managed_block(alloc: &PortAllocation, framework: Framework) -> Vec<Stri
 /// Merge a fresh managed block into existing `.env.local` content. User lines
 /// (everything outside a previous managed block) are preserved verbatim; the
 /// managed block is placed at the end so its values win under dotenv semantics.
+/// Test helper: extract user lines from `existing` and assemble with `managed`.
+#[cfg(test)]
 fn merge_managed_block(existing: &str, managed: &[String]) -> String {
-    let mut user_lines: Vec<&str> = Vec::new();
+    assemble(&extract_user_lines(existing), managed)
+}
+
+/// Pull the user-owned lines (everything outside the managed markers), dropping
+/// trailing blanks so repeated runs don't accumulate whitespace.
+fn extract_user_lines(existing: &str) -> Vec<String> {
+    let mut user_lines: Vec<String> = Vec::new();
     let mut in_block = false;
     for line in existing.lines() {
         match line.trim() {
             MANAGED_BEGIN => in_block = true,
             MANAGED_END => in_block = false,
-            _ if !in_block => user_lines.push(line),
+            _ if !in_block => user_lines.push(line.to_string()),
             _ => {}
         }
     }
-
-    // Trim trailing blank user lines so re-runs don't accumulate whitespace.
     while matches!(user_lines.last(), Some(l) if l.trim().is_empty()) {
         user_lines.pop();
     }
+    user_lines
+}
 
+/// Assemble the final `.env.local`: user lines first, then the managed block
+/// (last, so its values win under dotenv semantics).
+fn assemble(user_lines: &[String], managed: &[String]) -> String {
     let mut out = String::new();
     if !user_lines.is_empty() {
         out.push_str(&user_lines.join("\n"));
@@ -504,5 +554,58 @@ mod tests {
         // Only "/exists/live" is present.
         let orphans = orphaned_allocations(&registry, |p| p == "/exists/live");
         assert_eq!(orphans, vec!["dead".to_string()]);
+    }
+
+    #[test]
+    fn swap_db_preserves_creds_host_port_query() {
+        assert_eq!(
+            swap_db_in_url("postgres://user:pass@db.internal:5432/olddb", "feat_x"),
+            Some("postgres://user:pass@db.internal:5432/feat_x".to_string())
+        );
+        assert_eq!(
+            swap_db_in_url("postgres://localhost/olddb", "feat_x"),
+            Some("postgres://localhost/feat_x".to_string())
+        );
+        assert_eq!(
+            swap_db_in_url("mysql://root@localhost:3306/app?ssl=true", "feat_x"),
+            Some("mysql://root@localhost:3306/feat_x?ssl=true".to_string())
+        );
+        // No db path to swap → None (caller keeps the default).
+        assert_eq!(swap_db_in_url("postgres://localhost", "feat_x"), None);
+        assert_eq!(swap_db_in_url("not a url", "feat_x"), None);
+    }
+
+    #[test]
+    fn derive_uses_existing_and_falls_back() {
+        let lines = vec!["DATABASE_URL=postgres://u:p@host:5432/prod".to_string()];
+        assert_eq!(
+            derive_database_url(&lines, "feat_x"),
+            Some("postgres://u:p@host:5432/feat_x".to_string())
+        );
+        // No user DATABASE_URL → None (default applies).
+        let none = vec!["API_KEY=x".to_string()];
+        assert_eq!(derive_database_url(&none, "feat_x"), None);
+    }
+
+    #[test]
+    fn write_env_derivation_end_to_end() {
+        // A worktree .env.local that already has a real DATABASE_URL + secret.
+        let base = std::env::temp_dir().join(format!("workz_iso_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(
+            base.join(".env.local"),
+            "API_KEY=secret\nDATABASE_URL=postgres://u:p@rds.example.com:5432/prod\n",
+        )
+        .unwrap();
+
+        write_env_local(&base, &sample_alloc(), Framework::Unknown).unwrap();
+        let out = std::fs::read_to_string(base.join(".env.local")).unwrap();
+
+        // Secret preserved; managed DATABASE_URL derived from the user's URL.
+        assert!(out.contains("API_KEY=secret"));
+        assert!(out.contains("DATABASE_URL=postgres://u:p@rds.example.com:5432/feat_x"));
+        assert!(!out.contains("postgres://localhost"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
