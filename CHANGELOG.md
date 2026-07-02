@@ -3,7 +3,22 @@
 All notable changes to workz are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [0.9.0] — unreleased ("The Strip")
+## [0.10.0] — unreleased ("The Hook Release")
+
+### Added
+- **Config v2 — additive keys and per-directory strategies.**
+  - `symlink_add` / `copy_add` / `ignore_add` extend the built-in defaults instead of
+    replacing them (the bare `symlink` / `copy` / `ignore` keys still replace).
+  - `[sync.overrides]` sets a per-entry strategy: `name = "symlink" | "copy" | "ignore"`.
+    `node_modules = "copy"` physically copies the directory — the escape hatch for tools
+    that break on symlinked node_modules (Vite / Vitest / pnpm monorepos).
+
+### Fixed
+- **Global/project config merge.** Project `.workz.toml` now overrides global config
+  per key. Previously, a project that customized any sync value silently discarded the
+  global sync config (and vice-versa) due to an equality-to-default check.
+
+## [0.9.0] ("The Strip")
 
 workz is refocusing. Claude Code, Cursor, and Codex all create worktrees natively
 now, and every one of them punts on the hard part: making a fresh worktree actually
