@@ -231,6 +231,8 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
                 .as_str()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let isolated = args["isolated"].as_bool().unwrap_or(false);
+
             let root = git::repo_root()?;
             if path == root {
                 anyhow::bail!("cannot sync the main worktree");
@@ -238,20 +240,41 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
             let config = config::load_config(&root)?;
             let report =
                 sync::sync_worktree(&root, &path, &config.sync, sync::SyncOptions::default())?;
-            let mut out = format!("synced worktree at {}", path.display());
-            if !report.symlinked.is_empty() {
-                out.push_str(&format!("\nsymlinked: {}", report.symlinked.join(", ")));
-            }
-            if !report.copied.is_empty() {
-                out.push_str(&format!("\ncopied: {}", report.copied.join(", ")));
-            }
-            if let Some(cmd) = &report.installed {
-                out.push_str(&format!("\ninstalled: {cmd}"));
-            }
-            for w in &report.warnings {
-                out.push_str(&format!("\nwarning: {w}"));
-            }
-            Ok(out)
+            let branch = git::current_branch(&path).unwrap_or_default();
+
+            let iso = if isolated {
+                Some(isolation::setup_isolation(
+                    &branch,
+                    &path,
+                    config.isolation.port_range_size,
+                    report.framework,
+                )?)
+            } else {
+                None
+            };
+
+            let iso_json = match &iso {
+                Some(i) => json!({
+                    "port": i.port,
+                    "port_end": i.port_end,
+                    "port_count": i.port_count,
+                    "db_name": i.db_name,
+                    "compose_project": i.compose_project,
+                    "env_file": ".env.local",
+                }),
+                None => Value::Null,
+            };
+
+            let out = json!({
+                "worktree": path.to_string_lossy(),
+                "branch": branch,
+                "symlinked": report.symlinked,
+                "copied": report.copied,
+                "installed": report.installed,
+                "isolation": iso_json,
+                "warnings": report.warnings,
+            });
+            Ok(serde_json::to_string_pretty(&out)?)
         }
 
         "workz_done" => {
@@ -320,11 +343,12 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "workz_sync",
-            "description": "Re-sync symlinks, env files, and dependencies into a worktree. Useful for worktrees not created by workz.",
+            "description": "Make a worktree runnable: symlink deps, copy env files, install, and optionally allocate an isolated PORT range / DB / compose project. Returns a JSON object (worktree, branch, symlinked, copied, installed, isolation, warnings). Idempotent.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path to the worktree (defaults to current directory)" }
+                    "path": { "type": "string", "description": "Absolute path to the worktree (defaults to current directory)" },
+                    "isolated": { "type": "boolean", "description": "Also allocate PORT range, DB_NAME, COMPOSE_PROJECT_NAME and write .env.local" }
                 }
             }
         },
