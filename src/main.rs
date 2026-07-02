@@ -347,6 +347,8 @@ pub fn human_size(bytes: u64) -> String {
 // ── switch ─────────────────────────────────────────────────────────────
 
 fn cmd_switch(query: Option<&str>) -> Result<()> {
+    use std::io::IsTerminal;
+
     let worktrees = git::worktree_list()?;
 
     let candidates: Vec<_> = worktrees.iter().filter(|w| !w.is_bare).collect();
@@ -359,6 +361,32 @@ fn cmd_switch(query: Option<&str>) -> Result<()> {
     if candidates.len() == 1 {
         println!("{}{}", CD_PREFIX, candidates[0].path.display());
         return Ok(());
+    }
+
+    // With a query, try a direct jump first (zoxide-style — works in scripts,
+    // no terminal required). Exact branch match wins; otherwise a unique
+    // substring match.
+    if let Some(q) = query {
+        if let Some(w) = candidates.iter().find(|w| w.branch == q) {
+            println!("{}{}", CD_PREFIX, w.path.display());
+            return Ok(());
+        }
+        let subs: Vec<_> = candidates
+            .iter()
+            .filter(|w| w.branch.contains(q) || w.path.to_string_lossy().contains(q))
+            .collect();
+        if subs.len() == 1 {
+            println!("{}{}", CD_PREFIX, subs[0].path.display());
+            return Ok(());
+        }
+    }
+
+    // Multiple candidates → interactive fuzzy select, which needs a terminal.
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "`workz switch` needs a terminal for fuzzy selection — pass a query that uniquely matches a worktree (e.g. `workz switch {}`)",
+            candidates[0].branch
+        );
     }
 
     // Build display lines: "branch  ->  /path"

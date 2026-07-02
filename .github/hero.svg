@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380" width="1200" height="380" font-family="'DejaVu Sans','Segoe UI',ui-sans-serif,sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1e1e2e"/>
+      <stop offset="1" stop-color="#11111b"/>
+    </linearGradient>
+    <linearGradient id="word" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#cba6f7"/>
+      <stop offset="0.55" stop-color="#89b4fa"/>
+      <stop offset="1" stop-color="#94e2d5"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="380" rx="20" fill="url(#bg)"/>
+  <rect x="1" y="1" width="1198" height="378" rx="19" fill="none" stroke="#313244" stroke-width="2"/>
+
+  <!-- left: wordmark + tagline + pills -->
+  <text x="64" y="132" font-size="82" font-weight="700" fill="url(#word)" letter-spacing="-2">workz</text>
+  <text x="68" y="178" font-size="23" font-weight="600" fill="#cdd6f4">The environment engine for agent worktrees</text>
+  <text x="68" y="212" font-size="17" fill="#9399b2">Your agent creates the worktree — workz makes it run.</text>
+
+  <!-- pills -->
+  <g font-size="16" font-weight="600">
+    <rect x="66" y="250" width="196" height="40" rx="20" fill="#313244"/>
+    <circle cx="90" cy="270" r="5" fill="#a6e3a1"/>
+    <text x="104" y="276" fill="#bac2de">zero-config deps</text>
+
+    <rect x="274" y="250" width="308" height="40" rx="20" fill="#313244"/>
+    <circle cx="298" cy="270" r="5" fill="#89b4fa"/>
+    <text x="312" y="276" fill="#bac2de">port · db · compose isolation</text>
+
+    <rect x="594" y="250" width="214" height="40" rx="20" fill="#313244"/>
+    <circle cx="618" cy="270" r="5" fill="#f5c2e7"/>
+    <text x="632" y="276" fill="#bac2de">one hook, any agent</text>
+  </g>
+
+  <text x="68" y="336" font-size="15" fill="#6c7086" font-family="'DejaVu Sans Mono',monospace">$ workz start feature/checkout --isolated</text>
+
+  <!-- right: worktree isolation diagram -->
+  <g transform="translate(720,54)">
+    <!-- main repo node -->
+    <rect x="70" y="0" width="200" height="46" rx="10" fill="#181825" stroke="#45475a" stroke-width="1.5"/>
+    <text x="170" y="22" font-size="15" font-weight="700" fill="#cdd6f4" text-anchor="middle">main repo</text>
+    <text x="170" y="38" font-size="12" fill="#6c7086" text-anchor="middle" font-family="'DejaVu Sans Mono',monospace">node_modules · .env · db</text>
+
+    <!-- connectors -->
+    <path d="M170 46 V78 M60 78 H280 M60 78 V96 M170 78 V96 M280 78 V96" fill="none" stroke="#45475a" stroke-width="1.5"/>
+
+    <!-- three isolated worktrees -->
+    <g font-family="'DejaVu Sans Mono',monospace">
+      <rect x="-6" y="96" width="132" height="76" rx="10" fill="#181825" stroke="#89b4fa" stroke-width="1.5"/>
+      <text x="60" y="120" font-size="13" font-weight="700" fill="#89b4fa" text-anchor="middle">feature/auth</text>
+      <text x="60" y="142" font-size="12" fill="#a6adc8" text-anchor="middle">:3000-3009</text>
+      <text x="60" y="160" font-size="12" fill="#a6adc8" text-anchor="middle">db · auth</text>
+
+      <rect x="138" y="96" width="132" height="76" rx="10" fill="#181825" stroke="#a6e3a1" stroke-width="1.5"/>
+      <text x="204" y="120" font-size="13" font-weight="700" fill="#a6e3a1" text-anchor="middle">feature/api</text>
+      <text x="204" y="142" font-size="12" fill="#a6adc8" text-anchor="middle">:3010-3019</text>
+      <text x="204" y="160" font-size="12" fill="#a6adc8" text-anchor="middle">db · api</text>
+
+      <rect x="282" y="96" width="132" height="76" rx="10" fill="#181825" stroke="#fab387" stroke-width="1.5"/>
+      <text x="348" y="120" font-size="13" font-weight="700" fill="#fab387" text-anchor="middle">feature/ui</text>
+      <text x="348" y="142" font-size="12" fill="#a6adc8" text-anchor="middle">:3020-3029</text>
+      <text x="348" y="160" font-size="12" fill="#a6adc8" text-anchor="middle">db · ui</text>
+    </g>
+    <text x="204" y="196" font-size="12.5" fill="#6c7086" text-anchor="middle">no collisions · run all three at once</text>
+  </g>
+</svg>

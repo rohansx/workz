@@ -16,6 +16,12 @@ All notable changes to workz are documented here. This project adheres to
   install the worktree hook for your agent tool in one step. `workz init -y` runs
   non-interactively with detected defaults.
 
+### Fixed
+- **`workz switch` no longer panics without a terminal.** With a query it now jumps
+  directly on an exact or unique match (zoxide-style — works in scripts and non-tty
+  contexts); it only opens the fuzzy picker when selection is ambiguous, and prints a
+  clear error instead of a skim backtrace when there's no terminal.
+
 ### Changed
 - **`init` is now the setup wizard.** `workz init <shell>` (the old way to print shell
   integration) still works but prints a deprecation note pointing at
