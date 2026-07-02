@@ -16,6 +16,9 @@ All notable changes to workz are documented here. This project adheres to
 - **`init` is now the setup wizard.** `workz init <shell>` (the old way to print shell
   integration) still works but prints a deprecation note pointing at
   `workz shell-init <shell>`.
+- **MCP `workz_sync` retargeted.** It now accepts `isolated` and returns the same
+  structured JSON as the CLI (`worktree`, `branch`, `symlinked`, `copied`, `installed`,
+  `isolation`, `warnings`) so agents can allocate an isolated environment in one call.
 
 ## [0.10.0] ("The Hook Release")
 
