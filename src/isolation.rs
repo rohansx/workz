@@ -90,9 +90,25 @@ pub fn branch_to_slug(branch: &str) -> String {
 
 // ── Port allocation ──────────────────────────────────────────────────────────
 
+/// Whether a TCP port is free to bind on localhost right now.
+fn port_is_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
 /// Allocate a contiguous block of `range_size` ports that doesn't overlap any
-/// existing allocation. Aligns to `range_size` boundaries for clean ranges.
+/// existing allocation. Uses the real bind check to also skip ranges whose base
+/// port is currently held by some other (non-workz) process.
 fn next_available_port_range(registry: &PortRegistry, range_size: u16) -> u16 {
+    next_available_port_range_with(registry, range_size, port_is_free)
+}
+
+/// Core allocator with an injectable "is this port free?" predicate (so the
+/// overlap logic is unit-testable without touching real sockets).
+fn next_available_port_range_with(
+    registry: &PortRegistry,
+    range_size: u16,
+    is_free: impl Fn(u16) -> bool,
+) -> u16 {
     let occupied: Vec<(u16, u16)> = registry
         .allocations
         .values()
@@ -112,7 +128,9 @@ fn next_available_port_range(registry: &PortRegistry, range_size: u16) -> u16 {
         let overlaps = occupied
             .iter()
             .any(|&(start, end)| candidate < end && candidate_end > start);
-        if !overlaps {
+        // A range is usable when it doesn't overlap a tracked allocation AND its
+        // base port isn't already bound by something else.
+        if !overlaps && is_free(candidate) {
             return candidate;
         }
         candidate += range_size;
@@ -451,7 +469,7 @@ mod tests {
     fn range_allocation_no_overlap() {
         let mut registry = PortRegistry { base_port: 3000, allocations: HashMap::new() };
 
-        let port1 = next_available_port_range(&registry, 10);
+        let port1 = next_available_port_range_with(&registry, 10, |_| true);
         assert_eq!(port1, 3000);
 
         registry.allocations.insert("first".into(), PortAllocation {
@@ -461,7 +479,7 @@ mod tests {
             allocated_at: "2024-01-01T00:00:00Z".into(),
         });
 
-        let port2 = next_available_port_range(&registry, 10);
+        let port2 = next_available_port_range_with(&registry, 10, |_| true);
         assert_eq!(port2, 3010);
     }
 
@@ -475,7 +493,7 @@ mod tests {
             allocated_at: "2024-01-01T00:00:00Z".into(),
         });
 
-        let port = next_available_port_range(&registry, 10);
+        let port = next_available_port_range_with(&registry, 10, |_| true);
         assert_eq!(port, 3010);
     }
 
@@ -496,8 +514,24 @@ mod tests {
             allocated_at: "2024-01-01T00:00:00Z".into(),
         });
 
-        let port = next_available_port_range(&registry, 10);
+        let port = next_available_port_range_with(&registry, 10, |_| true);
         assert_eq!(port, 3010);
+    }
+
+    #[test]
+    fn range_allocation_skips_busy_base_port() {
+        let registry = PortRegistry { base_port: 3000, allocations: HashMap::new() };
+        // Pretend 3000 is bound by another process; 3010 is free.
+        let port = next_available_port_range_with(&registry, 10, |p| p != 3000);
+        assert_eq!(port, 3010);
+    }
+
+    #[test]
+    fn port_is_free_detects_bound_port() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(!port_is_free(port), "a bound port must read as not free");
+        drop(listener);
     }
 
     fn sample_alloc() -> PortAllocation {
