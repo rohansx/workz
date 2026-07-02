@@ -3,6 +3,7 @@ mod config;
 mod doctor;
 mod git;
 mod hook;
+mod init;
 mod isolation;
 mod mcp;
 mod sync;
@@ -61,6 +62,26 @@ fn main() -> Result<()> {
             }
         }
         Commands::Hook { host, install } => hook::run(host, install),
+        Commands::Init { yes, shell } => match shell {
+            // Back-compat: `workz init <shell>` used to print shell integration.
+            Some(s) => match s.as_str() {
+                "zsh" | "bash" | "fish" => {
+                    eprintln!(
+                        "note: `workz init {s}` is deprecated — use `workz shell-init {s}`"
+                    );
+                    let shell = match s.as_str() {
+                        "zsh" => Shell::Zsh,
+                        "bash" => Shell::Bash,
+                        _ => Shell::Fish,
+                    };
+                    cmd_init(&shell)
+                }
+                other => bail!(
+                    "unknown argument '{other}' — run `workz init` for setup, or `workz shell-init <shell>`"
+                ),
+            },
+            None => init::run(yes),
+        },
         Commands::Mcp => mcp::run(),
         Commands::ShellInit { shell } => cmd_init(&shell),
     }
@@ -698,6 +719,7 @@ if [ -n "$ZSH_VERSION" ]; then
             'conflicts:Show files modified in multiple worktrees'
             'doctor:Diagnose broken symlinks, orphaned ports, stale config'
             'hook:Print/install the worktree-hook recipe for a host'
+            'init:Set up workz for this project'
             'mcp:Start the MCP server for AI agents'
             'shell-init:Print shell integration script'
         )
@@ -748,7 +770,7 @@ else
         prev="${COMP_WORDS[COMP_CWORD-1]}"
 
         if [[ ${COMP_CWORD} -eq 1 ]]; then
-            COMPREPLY=($(compgen -W "start list ls switch s sync status done clean conflicts doctor hook mcp shell-init" -- "$cur"))
+            COMPREPLY=($(compgen -W "start list ls switch s sync status done clean conflicts doctor hook init mcp shell-init" -- "$cur"))
             return
         fi
 
@@ -809,6 +831,8 @@ complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s syn
 complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a conflicts -d "Show files modified in multiple worktrees"
 complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a doctor -d "Diagnose broken symlinks, orphaned ports, stale config"
 complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a hook -d "Print/install the worktree-hook recipe for a host"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a init -d "Set up workz for this project"
+complete -c workz -n "__fish_seen_subcommand_from init" -s y -d "Run non-interactively with detected defaults"
 complete -c workz -n "__fish_seen_subcommand_from hook" -a "claude cursor codex conductor worktrunk generic"
 complete -c workz -n "__fish_seen_subcommand_from hook" -l install -d "Write the config file (never overwrites)"
 complete -c workz -n "__fish_seen_subcommand_from doctor" -l fix -d "Apply safe repairs"

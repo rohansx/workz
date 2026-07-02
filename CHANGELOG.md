@@ -3,7 +3,21 @@
 All notable changes to workz are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [0.10.0] — unreleased ("The Hook Release")
+## [0.11.0] — unreleased ("The Wizard")
+
+### Added
+- **`workz init`** — a short setup wizard. It detects the project (language, package
+  manager, framework, docker-compose, monorepo), asks a few skippable questions, writes a
+  minimal `.workz.toml` (only your deviations from the zero-config defaults), and can
+  install the worktree hook for your agent tool in one step. `workz init -y` runs
+  non-interactively with detected defaults.
+
+### Changed
+- **`init` is now the setup wizard.** `workz init <shell>` (the old way to print shell
+  integration) still works but prints a deprecation note pointing at
+  `workz shell-init <shell>`.
+
+## [0.10.0] ("The Hook Release")
 
 ### Added
 - **`workz conflicts`** — show files modified in more than one worktree (potential merge
