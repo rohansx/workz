@@ -73,8 +73,27 @@ pub enum Commands {
         cleanup_db: bool,
     },
 
-    /// Sync symlinks, env files, and deps into the current worktree
-    Sync,
+    /// Sync symlinks, env files, and deps into a worktree (the hook other tools call)
+    Sync {
+        /// Worktree path to sync (defaults to the current directory)
+        path: Option<std::path::PathBuf>,
+
+        /// Also allocate an isolated PORT range, DB_NAME, COMPOSE_PROJECT_NAME
+        #[arg(long)]
+        isolated: bool,
+
+        /// Emit a single JSON object describing what was synced
+        #[arg(long)]
+        json: bool,
+
+        /// Suppress success output (warnings still go to stderr)
+        #[arg(long)]
+        quiet: bool,
+
+        /// Skip dependency auto-install (symlink + copy only)
+        #[arg(long)]
+        no_install: bool,
+    },
 
     /// Show rich status of all worktrees
     Status,

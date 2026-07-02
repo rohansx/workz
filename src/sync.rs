@@ -29,14 +29,68 @@ pub enum Framework {
     GoGeneric,
 }
 
+/// Options controlling a sync run.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SyncOptions {
+    /// Skip the auto-install step (symlink + copy only).
+    pub no_install: bool,
+    /// Suppress the human-facing "installing..." notice (subprocess output still streams).
+    pub quiet: bool,
+}
+
+/// What a sync actually did — returned so the caller decides how to render it
+/// (human summary, `--json`, or `--quiet`).
+#[derive(Debug, Default)]
+pub struct SyncReport {
+    pub symlinked: Vec<String>,
+    pub copied: Vec<String>,
+    /// The package-manager command that ran, e.g. "npm ci" — None if nothing installed.
+    pub installed: Option<String>,
+    pub warnings: Vec<String>,
+    pub framework: Framework,
+}
+
+impl SyncReport {
+    /// Multi-line indented summary for human output. Empty string if nothing happened.
+    pub fn human_summary(&self) -> String {
+        let mut lines = Vec::new();
+        if !self.symlinked.is_empty() {
+            lines.push(format!("  symlinked {}", self.symlinked.join(", ")));
+        }
+        if !self.copied.is_empty() {
+            lines.push(format!("  copied {}", self.copied.join(", ")));
+        }
+        if let Some(cmd) = &self.installed {
+            lines.push(format!("  installed deps ({cmd})"));
+        }
+        if lines.is_empty() {
+            "  nothing to sync (already up to date)".to_string()
+        } else {
+            lines.join("\n")
+        }
+    }
+}
+
 /// Sync a worktree: symlink heavy directories, copy env files, and auto-install deps.
-/// Returns the detected web framework for use by isolation.
-pub fn sync_worktree(source: &Path, target: &Path, config: &SyncConfig) -> Result<Framework> {
+/// Collects everything it did into a [`SyncReport`]. Idempotent — already-correct
+/// symlinks/copies are left untouched.
+pub fn sync_worktree(
+    source: &Path,
+    target: &Path,
+    config: &SyncConfig,
+    opts: SyncOptions,
+) -> Result<SyncReport> {
     let project = detect_project(source);
-    symlink_dirs(source, target, &config.symlink, &config.ignore, &project)?;
-    copy_files(source, target, &config.copy, &config.ignore)?;
-    auto_install(source, target, &project)?;
-    Ok(project.framework)
+    let mut report = SyncReport {
+        framework: project.framework,
+        ..Default::default()
+    };
+    symlink_dirs(source, target, &config.symlink, &config.ignore, &project, &mut report);
+    copy_files(source, target, &config.copy, &config.ignore, &mut report)?;
+    if !opts.no_install {
+        auto_install(source, target, &project, opts.quiet, &mut report);
+    }
+    Ok(report)
 }
 
 /// Detected project types (a repo can be multiple, e.g. Node + Python monorepo).
@@ -224,7 +278,8 @@ fn symlink_dirs(
     dirs: &[String],
     ignore: &[String],
     project: &ProjectInfo,
-) -> Result<()> {
+    report: &mut SyncReport,
+) {
     for dir_name in dirs {
         if ignore.iter().any(|i| i == dir_name) {
             continue;
@@ -243,36 +298,30 @@ fn symlink_dirs(
             continue;
         }
 
-        // Never overwrite an existing file, dir, or symlink
+        // Never overwrite an existing file, dir, or symlink (idempotent).
         if dst.exists() || dst.symlink_metadata().is_ok() {
             continue;
         }
 
-        if let Err(e) = create_symlink(&src, &dst) {
-            eprintln!("  warning: could not symlink {}: {}", dir_name, e);
-        } else {
-            println!("  symlinked {}", dir_name);
+        match create_symlink(&src, &dst) {
+            Err(e) => report.warnings.push(format!("could not symlink {dir_name}: {e}")),
+            Ok(()) => report.symlinked.push(dir_name.clone()),
         }
     }
-
-    Ok(())
 }
 
 /// Auto-install dependencies if the deps dir doesn't exist in source or target.
-fn auto_install(source: &Path, target: &Path, project: &ProjectInfo) -> Result<()> {
+fn auto_install(
+    source: &Path,
+    target: &Path,
+    project: &ProjectInfo,
+    quiet: bool,
+    report: &mut SyncReport,
+) {
     // Node: if node_modules doesn't exist anywhere, offer to install
     if project.has_node && !source.join("node_modules").exists() && !target.join("node_modules").exists() {
         if let Some(cmd) = &project.node_install_cmd {
-            println!("  installing node dependencies ({})...", cmd[0]);
-            let status = std::process::Command::new(&cmd[0])
-                .args(&cmd[1..])
-                .current_dir(target)
-                .status();
-            match status {
-                Ok(s) if s.success() => println!("  dependencies installed"),
-                Ok(s) => eprintln!("  warning: {} exited with {}", cmd[0], s),
-                Err(e) => eprintln!("  warning: could not run {}: {}", cmd[0], e),
-            }
+            run_install(cmd, target, quiet, report);
         }
     }
 
@@ -284,20 +333,26 @@ fn auto_install(source: &Path, target: &Path, project: &ProjectInfo) -> Result<(
         && !target.join("venv").exists()
     {
         if let Some(cmd) = &project.python_install_cmd {
-            println!("  installing python dependencies ({})...", cmd[0]);
-            let status = std::process::Command::new(&cmd[0])
-                .args(&cmd[1..])
-                .current_dir(target)
-                .status();
-            match status {
-                Ok(s) if s.success() => println!("  dependencies installed"),
-                Ok(s) => eprintln!("  warning: {} exited with {}", cmd[0], s),
-                Err(e) => eprintln!("  warning: could not run {}: {}", cmd[0], e),
-            }
+            run_install(cmd, target, quiet, report);
         }
     }
+}
 
-    Ok(())
+/// Run one install command, streaming its output and recording the result.
+fn run_install(cmd: &[String], target: &Path, quiet: bool, report: &mut SyncReport) {
+    let pretty = cmd.join(" ");
+    if !quiet {
+        println!("  installing dependencies ({pretty})...");
+    }
+    match std::process::Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .current_dir(target)
+        .status()
+    {
+        Ok(s) if s.success() => report.installed = Some(pretty),
+        Ok(s) => report.warnings.push(format!("{} exited with {}", cmd[0], s)),
+        Err(e) => report.warnings.push(format!("could not run {}: {}", cmd[0], e)),
+    }
 }
 
 /// Copy files matching glob patterns from source into target.
@@ -306,6 +361,7 @@ fn copy_files(
     target: &Path,
     patterns: &[String],
     ignore: &[String],
+    report: &mut SyncReport,
 ) -> Result<()> {
     for pattern in patterns {
         let full_pattern = source.join(pattern);
@@ -333,6 +389,7 @@ fn copy_files(
             }
 
             let dst = target.join(&rel_path);
+            // Never overwrite an existing file (idempotent).
             if dst.exists() {
                 continue;
             }
@@ -343,11 +400,11 @@ fn copy_files(
                 }
             }
 
-            let display_path = rel_path.display();
+            let display_path = rel_path.display().to_string();
             if let Err(e) = std::fs::copy(&entry, &dst) {
-                eprintln!("  warning: could not copy {}: {}", display_path, e);
+                report.warnings.push(format!("could not copy {display_path}: {e}"));
             } else {
-                println!("  copied {}", display_path);
+                report.copied.push(display_path);
             }
         }
     }
@@ -404,10 +461,12 @@ mod tests {
         let (source, target) = setup_dirs();
         fs::write(source.join(".env"), "SECRET=abc").unwrap();
 
-        copy_files(&source, &target, &[".env".into()], &[]).unwrap();
+        let mut report = SyncReport::default();
+        copy_files(&source, &target, &[".env".into()], &[], &mut report).unwrap();
 
         assert!(target.join(".env").exists());
         assert_eq!(fs::read_to_string(target.join(".env")).unwrap(), "SECRET=abc");
+        assert_eq!(report.copied, vec![".env".to_string()]);
     }
 
     #[test]
@@ -416,7 +475,8 @@ mod tests {
         fs::create_dir_all(source.join(".claude")).unwrap();
         fs::write(source.join(".claude/settings.local.json"), r#"{"key":1}"#).unwrap();
 
-        copy_files(&source, &target, &[".claude/settings.local.json".into()], &[]).unwrap();
+        let mut report = SyncReport::default();
+        copy_files(&source, &target, &[".claude/settings.local.json".into()], &[], &mut report).unwrap();
 
         assert!(target.join(".claude/settings.local.json").exists());
         assert_eq!(
@@ -432,7 +492,8 @@ mod tests {
         fs::write(source.join(".env"), "SECRET=abc").unwrap();
         fs::write(source.join(".env.local"), "LOCAL=1").unwrap();
 
-        copy_files(&source, &target, &[".env*".into()], &[".env.local".into()]).unwrap();
+        let mut report = SyncReport::default();
+        copy_files(&source, &target, &[".env*".into()], &[".env.local".into()], &mut report).unwrap();
 
         assert!(target.join(".env").exists());
         assert!(!target.join(".env.local").exists());
@@ -444,8 +505,25 @@ mod tests {
         fs::write(source.join(".env"), "NEW").unwrap();
         fs::write(target.join(".env"), "EXISTING").unwrap();
 
-        copy_files(&source, &target, &[".env".into()], &[]).unwrap();
+        let mut report = SyncReport::default();
+        copy_files(&source, &target, &[".env".into()], &[], &mut report).unwrap();
 
         assert_eq!(fs::read_to_string(target.join(".env")).unwrap(), "EXISTING");
+    }
+
+    #[test]
+    fn test_copy_files_idempotent() {
+        let (source, target) = setup_dirs();
+        fs::write(source.join(".env"), "SECRET=abc").unwrap();
+
+        let mut first = SyncReport::default();
+        copy_files(&source, &target, &[".env".into()], &[], &mut first).unwrap();
+        assert_eq!(first.copied, vec![".env".to_string()]);
+
+        // Second run: file already present → nothing copied, no warnings.
+        let mut second = SyncReport::default();
+        copy_files(&source, &target, &[".env".into()], &[], &mut second).unwrap();
+        assert!(second.copied.is_empty());
+        assert!(second.warnings.is_empty());
     }
 }

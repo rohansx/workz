@@ -24,11 +24,30 @@ the full rationale.
 
 The binary is now ~2,200 lines lighter and builds without four heavy dependencies.
 
+### Added
+- **`workz sync` is now the hero command — the setup step other tools' worktree
+  hooks call.** New flags:
+  - `workz sync <path>` — sync any worktree by path (not just the current dir).
+  - `--isolated` — allocate the PORT range / DB / compose project during sync, so a
+    host hook can do everything in one call: `workz sync --isolated --quiet "$PATH"`.
+  - `--json` — emit a single machine-readable object (`worktree`, `branch`,
+    `symlinked`, `copied`, `installed`, `isolation`, `warnings`).
+  - `--quiet` — suppress success output (warnings still go to stderr).
+  - `--no-install` — symlink + copy only, skip dependency install.
+  - Fully **idempotent**: re-running only fills what's missing.
+
+### Fixed
+- **`--isolated` no longer destroys the copied `.env.local`.** Isolation vars now
+  live in a marked block and are merged in; user secrets outside the markers are
+  preserved, and repeated runs are idempotent.
+
 ### Changed
 - **`workz init <shell>` is now `workz shell-init <shell>`.** The old `init` name is
   kept as a hidden alias, so existing `eval "$(workz init zsh)"` lines keep working.
   `init` is reserved for the setup wizard landing in a later release.
 - New tagline everywhere: *the environment engine for agent worktrees*.
+- `sync_worktree` now returns a structured `SyncReport` instead of printing directly,
+  so callers render human / `--json` / `--quiet` output consistently.
 
 ### Kept
 - `start`, `sync`, `switch`, `list`, `status`, `done`, `clean`

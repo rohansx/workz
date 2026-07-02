@@ -41,7 +41,13 @@ fn main() -> Result<()> {
             delete_branch,
             cleanup_db,
         } => cmd_done(branch.as_deref(), force, delete_branch, cleanup_db),
-        Commands::Sync => cmd_sync(),
+        Commands::Sync {
+            path,
+            isolated,
+            json,
+            quiet,
+            no_install,
+        } => cmd_sync(path.as_deref(), isolated, json, quiet, no_install),
         Commands::Status => cmd_status(),
         Commands::Clean { merged, base } => cmd_clean(merged, base.as_deref()),
         Commands::Mcp => mcp::run(),
@@ -77,7 +83,12 @@ fn cmd_start(
     let config = config::load_config(&root)?;
 
     let framework = if !no_sync {
-        let fw = sync::sync_worktree(&root, &wt_path, &config.sync)?;
+        let report =
+            sync::sync_worktree(&root, &wt_path, &config.sync, sync::SyncOptions::default())?;
+        println!("{}", report.human_summary());
+        for w in &report.warnings {
+            eprintln!("  warning: {w}");
+        }
 
         // Run post_start hook if configured
         if let Some(hook) = &config.hooks.post_start {
@@ -90,7 +101,7 @@ fn cmd_start(
                 eprintln!("  warning: post_start hook exited with {}", status);
             }
         }
-        fw
+        report.framework
     } else {
         sync::Framework::Unknown
     };
@@ -420,18 +431,89 @@ fn stop_docker(path: &std::path::Path) {
 
 // ── sync ───────────────────────────────────────────────────────────────
 
-fn cmd_sync() -> Result<()> {
+fn cmd_sync(
+    path: Option<&std::path::Path>,
+    isolated: bool,
+    json: bool,
+    quiet: bool,
+    no_install: bool,
+) -> Result<()> {
     let root = git::repo_root()?;
-    let cwd = std::env::current_dir()?;
+    let target = match path {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    let target = target.canonicalize().unwrap_or(target);
 
-    if cwd == root {
-        bail!("you're in the main worktree — switch to a worktree first");
+    if target == root {
+        bail!("that's the main worktree — pass a worktree path or run from inside one");
     }
 
     let config = config::load_config(&root)?;
-    println!("syncing worktree at {}", cwd.display());
-    let _framework = sync::sync_worktree(&root, &cwd, &config.sync)?;
-    println!("done!");
+    let opts = sync::SyncOptions { no_install, quiet };
+    let report = sync::sync_worktree(&root, &target, &config.sync, opts)?;
+
+    // Resolve the branch (used for isolation + JSON output).
+    let branch = git::current_branch(&target).unwrap_or_default();
+
+    // Optionally allocate an isolated environment.
+    let iso = if isolated {
+        Some(isolation::setup_isolation(
+            &branch,
+            &target,
+            config.isolation.port_range_size,
+            report.framework,
+        )?)
+    } else {
+        None
+    };
+
+    if json {
+        let iso_json = match &iso {
+            Some(i) => serde_json::json!({
+                "port": i.port,
+                "port_end": i.port_end,
+                "port_count": i.port_count,
+                "db_name": i.db_name,
+                "compose_project": i.compose_project,
+                "env_file": ".env.local",
+            }),
+            None => serde_json::Value::Null,
+        };
+        let out = serde_json::json!({
+            "worktree": target.to_string_lossy(),
+            "branch": branch,
+            "symlinked": report.symlinked,
+            "copied": report.copied,
+            "installed": report.installed,
+            "isolation": iso_json,
+            "warnings": report.warnings,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if !quiet {
+        println!("synced {}", target.display());
+        println!("{}", report.human_summary());
+        if let Some(i) = &iso {
+            let range = if i.port_count > 1 {
+                format!("{}-{}", i.port, i.port_end)
+            } else {
+                i.port.to_string()
+            };
+            println!(
+                "  isolated: PORT={} DB_NAME={} COMPOSE_PROJECT_NAME={} → .env.local",
+                range, i.db_name, i.compose_project
+            );
+        }
+    }
+
+    // Warnings always surface on stderr, even under --quiet.
+    for w in &report.warnings {
+        eprintln!("  warning: {w}");
+    }
+
     Ok(())
 }
 
