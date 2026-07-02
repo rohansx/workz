@@ -63,7 +63,15 @@ workz sync --isolated --quiet "$WORKTREE_PATH"
 workz sync --isolated --quiet <path>
 ```
 
-`--json` makes the output machine-readable for scripting; `--quiet` keeps success
+Don't want to write the config by hand? `workz hook <host>` prints the exact recipe,
+and `workz hook cursor --install` writes it for you:
+
+```bash
+workz hook claude       # print the Claude Code WorktreeCreate hook
+workz hook cursor --install   # write .cursor/worktrees.json
+```
+
+`--json` makes the sync output machine-readable for scripting; `--quiet` keeps success
 output silent (warnings still go to stderr).
 
 ## Use it standalone
@@ -122,6 +130,8 @@ workz shell-init fish | source
 | `workz list` | List worktrees with size and status (aliased `ls`) |
 | `workz done [branch]` | Remove a worktree (`--force`, `--delete-branch`, `--cleanup-db`) |
 | `workz clean` | Prune stale worktrees (`--merged` also removes merged branches) |
+| `workz doctor` | Diagnose broken symlinks, orphaned ports, stale config (`--fix` repairs) |
+| `workz hook <host>` | Print/install the worktree-hook recipe for a host (`--install`) |
 | `workz mcp` | Run the MCP server (see below) |
 | `workz shell-init <shell>` | Print shell integration for zsh/bash/fish |
 
@@ -188,9 +198,20 @@ Two layers — project overrides global:
 
 ```toml
 [sync]
-symlink = ["node_modules", "target", ".venv", "my-large-cache"]
-copy = [".env*", ".envrc", "secrets.json"]
-ignore = ["logs", "tmp"]
+# Extend the built-in defaults (recommended — keeps node_modules, target, .venv, …):
+symlink_add = ["my-large-cache"]
+copy_add    = ["config/local.settings.json"]
+ignore_add  = ["logs", "tmp"]
+
+# …or replace the defaults wholesale:
+# symlink = ["node_modules", "target"]
+# copy    = [".env*", ".envrc"]
+
+# Per-directory strategy override — the escape hatch when symlinked
+# node_modules breaks Vite / Vitest / a pnpm monorepo:
+[sync.overrides]
+node_modules = "copy"      # copy instead of symlink
+".vscode"    = "ignore"    # skip entirely
 
 [hooks]
 post_start = "pnpm install --frozen-lockfile"
@@ -200,6 +221,10 @@ pre_done = "docker compose down"
 port_range_size = 10   # ports per worktree (default: 10)
 base_port = 3000       # first port (default: 3000)
 ```
+
+`symlink`/`copy`/`ignore` **replace** the built-in defaults; the `*_add` variants
+**extend** them. `[sync.overrides]` sets a per-entry strategy (`symlink` / `copy` /
+`ignore`). Project `.workz.toml` overrides `~/.config/workz/config.toml`.
 
 Zero config works out of the box for Node, Rust, Python, Go, and Java.
 

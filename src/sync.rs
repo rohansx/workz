@@ -81,12 +81,14 @@ pub fn sync_worktree(
     opts: SyncOptions,
 ) -> Result<SyncReport> {
     let project = detect_project(source);
+    let plan = config.resolve();
     let mut report = SyncReport {
         framework: project.framework,
         ..Default::default()
     };
-    symlink_dirs(source, target, &config.symlink, &config.ignore, &project, &mut report);
-    copy_files(source, target, &config.copy, &config.ignore, &mut report)?;
+    symlink_dirs(source, target, &plan.symlink_dirs, &project, &mut report);
+    copy_dirs(source, target, &plan.copy_dirs, &project, &mut report);
+    copy_files(source, target, &plan.copy_globs, &plan.ignore, &mut report)?;
     if !opts.no_install {
         auto_install(source, target, &project, opts.quiet, &mut report);
     }
@@ -272,19 +274,15 @@ fn is_relevant(dir_name: &str, project: &ProjectInfo) -> bool {
 }
 
 /// Symlink heavy directories from source into target (project-aware).
+/// `dirs` is already ignore-filtered by [`SyncConfig::resolve`].
 fn symlink_dirs(
     source: &Path,
     target: &Path,
     dirs: &[String],
-    ignore: &[String],
     project: &ProjectInfo,
     report: &mut SyncReport,
 ) {
     for dir_name in dirs {
-        if ignore.iter().any(|i| i == dir_name) {
-            continue;
-        }
-
         // Skip dirs not relevant to this project type
         if !is_relevant(dir_name, project) {
             continue;
@@ -306,6 +304,63 @@ fn symlink_dirs(
         match create_symlink(&src, &dst) {
             Err(e) => report.warnings.push(format!("could not symlink {dir_name}: {e}")),
             Ok(()) => report.symlinked.push(dir_name.clone()),
+        }
+    }
+}
+
+/// Physically copy directories (the `copy` strategy override) — the escape hatch
+/// for tools that break on symlinked node_modules (Vite/Vitest/pnpm monorepos).
+fn copy_dirs(
+    source: &Path,
+    target: &Path,
+    dirs: &[String],
+    project: &ProjectInfo,
+    report: &mut SyncReport,
+) {
+    for dir_name in dirs {
+        if !is_relevant(dir_name, project) {
+            continue;
+        }
+        let src = source.join(dir_name);
+        let dst = target.join(dir_name);
+        if !src.exists() {
+            continue;
+        }
+        // Idempotent: don't re-copy if the target dir already exists.
+        if dst.exists() || dst.symlink_metadata().is_ok() {
+            continue;
+        }
+        copy_dir_recursive(&src, &dst, report);
+        report.copied.push(format!("{dir_name}/"));
+    }
+}
+
+/// Recursively copy `src` into `dst`, recording any failures as warnings.
+fn copy_dir_recursive(src: &Path, dst: &Path, report: &mut SyncReport) {
+    if let Err(e) = std::fs::create_dir_all(dst) {
+        report.warnings.push(format!("could not create {}: {e}", dst.display()));
+        return;
+    }
+    let entries = match std::fs::read_dir(src) {
+        Ok(e) => e,
+        Err(e) => {
+            report.warnings.push(format!("could not read {}: {e}", src.display()));
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        match entry.file_type() {
+            Ok(ft) if ft.is_dir() => copy_dir_recursive(&from, &to, report),
+            Ok(_) => {
+                if !to.exists() {
+                    if let Err(e) = std::fs::copy(&from, &to) {
+                        report.warnings.push(format!("could not copy {}: {e}", from.display()));
+                    }
+                }
+            }
+            Err(e) => report.warnings.push(format!("stat failed {}: {e}", from.display())),
         }
     }
 }

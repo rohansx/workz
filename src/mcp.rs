@@ -274,26 +274,10 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
         }
 
         "workz_conflicts" => {
-            let worktrees = git::worktree_list()?;
-            let non_bare: Vec<_> = worktrees.iter().filter(|w| !w.is_bare).collect();
-
-            let mut file_map: std::collections::HashMap<String, Vec<String>> =
-                std::collections::HashMap::new();
-
-            for wt in &non_bare {
-                let files = git::modified_files(&wt.path).unwrap_or_default();
-                for f in files {
-                    file_map.entry(f).or_default().push(wt.branch.clone());
-                }
-            }
-
-            let mut conflicts: Vec<_> =
-                file_map.iter().filter(|(_, branches)| branches.len() > 1).collect();
-
+            let conflicts = git::find_conflicts()?;
             if conflicts.is_empty() {
                 Ok("no conflicts detected between worktrees".to_string())
             } else {
-                conflicts.sort_by_key(|(f, _)| f.as_str());
                 let mut out = String::from("conflicting files:\n");
                 for (file, branches) in &conflicts {
                     out.push_str(&format!("  {} — modified in: {}\n", file, branches.join(", ")));

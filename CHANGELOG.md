@@ -3,7 +3,38 @@
 All notable changes to workz are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [0.9.0] — unreleased ("The Strip")
+## [0.10.0] — unreleased ("The Hook Release")
+
+### Added
+- **`workz conflicts`** — show files modified in more than one worktree (potential merge
+  conflicts before they happen), promoted from MCP-only to a first-class CLI command.
+- **`workz hook <host>`** — print (or `--install`) the worktree-create hook recipe that
+  wires `workz sync --isolated` into a host tool: `claude`, `cursor`, `codex`,
+  `conductor`, `worktrunk`, or `generic`. `--install` writes the dedicated config file
+  for hosts that have one (e.g. Cursor's `.cursor/worktrees.json`) and never overwrites
+  an existing file.
+- **`workz doctor`** — diagnose the things that quietly break worktree setups:
+  dangling symlinks inside worktrees, orphaned port allocations (worktree gone),
+  stale worktree refs, and unparseable `.workz.toml` / global config. Exit code 1 when
+  problems are found (CI-friendly). `workz doctor --fix` applies the safe repairs:
+  release orphaned ports, remove dead symlinks, prune stale worktrees.
+- **Config v2 — additive keys and per-directory strategies.**
+  - `symlink_add` / `copy_add` / `ignore_add` extend the built-in defaults instead of
+    replacing them (the bare `symlink` / `copy` / `ignore` keys still replace).
+  - `[sync.overrides]` sets a per-entry strategy: `name = "symlink" | "copy" | "ignore"`.
+    `node_modules = "copy"` physically copies the directory — the escape hatch for tools
+    that break on symlinked node_modules (Vite / Vitest / pnpm monorepos).
+
+### Fixed
+- **First filename character dropped in `modified_files`.** `git()` trimmed the porcelain
+  output, stripping the leading space of the first status line so the first changed file
+  showed as `hared.txt` instead of `shared.txt`. Affected `workz conflicts` and the MCP
+  `workz_conflicts` tool. Now reads untrimmed stdout; covered by a regression test.
+- **Global/project config merge.** Project `.workz.toml` now overrides global config
+  per key. Previously, a project that customized any sync value silently discarded the
+  global sync config (and vice-versa) due to an equality-to-default check.
+
+## [0.9.0] ("The Strip")
 
 workz is refocusing. Claude Code, Cursor, and Codex all create worktrees natively
 now, and every one of them punts on the hard part: making a fresh worktree actually

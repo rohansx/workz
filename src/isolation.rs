@@ -195,6 +195,35 @@ pub fn get_allocation(branch: &str) -> Option<PortAllocation> {
     load_registry().allocations.get(&slug).cloned()
 }
 
+/// Slugs whose worktree path no longer exists (orphaned allocations). The
+/// `exists` predicate is injected so this is unit-testable without the filesystem.
+pub fn orphaned_allocations(registry: &PortRegistry, exists: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut orphans: Vec<String> = registry
+        .allocations
+        .iter()
+        .filter(|(_, a)| !exists(&a.worktree_path))
+        .map(|(slug, _)| slug.clone())
+        .collect();
+    orphans.sort();
+    orphans
+}
+
+/// Remove the given slugs from the port registry and persist. Returns how many
+/// were removed.
+pub fn release_slugs(slugs: &[String]) -> Result<usize> {
+    let mut registry = load_registry();
+    let mut removed = 0;
+    for slug in slugs {
+        if registry.allocations.remove(slug).is_some() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        save_registry(&registry)?;
+    }
+    Ok(removed)
+}
+
 // ── .env.local writer ────────────────────────────────────────────────────────
 
 /// Markers delimiting the workz-managed block inside `.env.local`. Everything
@@ -456,5 +485,24 @@ mod tests {
         let managed = build_managed_block(&sample_alloc(), Framework::Vite);
         let out = merge_managed_block("", &managed);
         assert!(out.contains("VITE_PORT=3010"));
+    }
+
+    #[test]
+    fn orphaned_allocations_flags_missing_paths() {
+        let mut registry = PortRegistry { base_port: 3000, allocations: HashMap::new() };
+        registry.allocations.insert("live".into(), PortAllocation {
+            port: 3000, port_count: 10,
+            branch: "live".into(), db_name: "live".into(), compose_project: "live".into(),
+            worktree_path: "/exists/live".into(), allocated_at: "2024-01-01T00:00:00Z".into(),
+        });
+        registry.allocations.insert("dead".into(), PortAllocation {
+            port: 3010, port_count: 10,
+            branch: "dead".into(), db_name: "dead".into(), compose_project: "dead".into(),
+            worktree_path: "/gone/dead".into(), allocated_at: "2024-01-01T00:00:00Z".into(),
+        });
+
+        // Only "/exists/live" is present.
+        let orphans = orphaned_allocations(&registry, |p| p == "/exists/live");
+        assert_eq!(orphans, vec!["dead".to_string()]);
     }
 }

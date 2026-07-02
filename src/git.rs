@@ -207,12 +207,75 @@ pub fn merged_branches(base: &str) -> Result<Vec<String>> {
 }
 
 /// List files with uncommitted changes (staged or unstaged) in a worktree.
+///
+/// Reads raw (untrimmed) stdout on purpose: `git()` trims the whole output,
+/// which would strip the leading space off the first porcelain line
+/// (` M file` → `M file`) and drop the first character of that filename.
 pub fn modified_files(path: &Path) -> Result<Vec<String>> {
-    let output = git_in(path, &["status", "--porcelain"])?;
-    Ok(output
+    let output = Command::new("git")
+        .args(["-C", path.to_str().unwrap_or("."), "status", "--porcelain"])
+        .output()
+        .context("failed to execute git — is it installed?")?;
+    if !output.status.success() {
+        bail!("git status failed in {}", path.display());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Porcelain v1: `XY PATH` — the path starts at byte offset 3.
+    Ok(stdout
         .lines()
         .filter(|l| l.len() > 3)
         .map(|l| l[3..].trim().to_string())
         .collect())
+}
+
+/// Files modified in more than one worktree — potential merge conflicts before
+/// they happen. Returns `(file, sorted branches)` sorted by file.
+pub fn find_conflicts() -> Result<Vec<(String, Vec<String>)>> {
+    let worktrees = worktree_list()?;
+    let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for wt in worktrees.iter().filter(|w| !w.is_bare) {
+        for f in modified_files(&wt.path).unwrap_or_default() {
+            map.entry(f).or_default().push(wt.branch.clone());
+        }
+    }
+    let mut conflicts: Vec<(String, Vec<String>)> =
+        map.into_iter().filter(|(_, branches)| branches.len() > 1).collect();
+    for (_, branches) in conflicts.iter_mut() {
+        branches.sort();
+    }
+    conflicts.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(conflicts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modified_files_keeps_first_char() {
+        // Regression: git() trims output, which dropped the leading space of the
+        // first porcelain line and ate the first filename character.
+        let dir = std::env::temp_dir().join(format!("workz_git_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(["-C", dir.to_str().unwrap()])
+                .args(args)
+                .output()
+                .unwrap();
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@t.com"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("shared.txt"), "base").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "init"]);
+        std::fs::write(dir.join("shared.txt"), "base\nmore").unwrap();
+
+        let files = modified_files(&dir).unwrap();
+        assert_eq!(files, vec!["shared.txt".to_string()], "first char must survive");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
