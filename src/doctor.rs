@@ -7,28 +7,46 @@ use std::path::{Path, PathBuf};
 
 use crate::{git, isolation};
 
-/// Run all diagnostics. Returns `true` if healthy (no problems found).
+/// Run all diagnostics and print them. Returns `true` if healthy (no problems).
 /// With `fix`, the safe repairs (release orphaned ports, remove dead symlinks,
 /// prune stale worktrees) are applied.
 pub fn run(fix: bool) -> Result<bool> {
-    println!("workz doctor{}\n", if fix { " (--fix)" } else { "" });
-    let mut problems = 0;
+    let (lines, healthy) = diagnose(fix)?;
+    for line in &lines {
+        println!("{line}");
+    }
+    Ok(healthy)
+}
+
+/// Read-only diagnostics as a text report (for the MCP `workz_doctor` tool).
+/// Never applies fixes.
+pub fn report() -> Result<String> {
+    let (lines, _) = diagnose(false)?;
+    Ok(lines.join("\n"))
+}
+
+/// Collect all diagnostics into lines + a healthy flag.
+fn diagnose(fix: bool) -> Result<(Vec<String>, bool)> {
+    let mut out = Vec::new();
+    out.push(format!("workz doctor{}", if fix { " (--fix)" } else { "" }));
+    out.push(String::new());
 
     let root = git::repo_root()?;
 
-    problems += check_config(&root);
-    problems += check_orphaned_ports(fix);
-    problems += check_worktrees(&root, fix);
-    check_tooling();
+    let mut problems = 0;
+    problems += check_config(&root, &mut out);
+    problems += check_orphaned_ports(fix, &mut out);
+    problems += check_worktrees(&root, fix, &mut out);
+    check_tooling(&mut out);
 
-    println!();
+    out.push(String::new());
     if problems == 0 {
-        println!("[ok] all checks passed");
-        Ok(true)
+        out.push("[ok] all checks passed".to_string());
+        Ok((out, true))
     } else {
         let hint = if fix { "" } else { " — re-run with --fix to repair" };
-        println!("[fail] {problems} problem(s) found{hint}");
-        Ok(false)
+        out.push(format!("[fail] {problems} problem(s) found{hint}"));
+        Ok((out, false))
     }
 }
 
@@ -36,7 +54,7 @@ pub fn run(fix: bool) -> Result<bool> {
 
 /// Strictly parse project + global config (unlike `load_config`, which ignores
 /// parse errors). Returns the number of problems.
-fn check_config(root: &Path) -> u32 {
+fn check_config(root: &Path, out: &mut Vec<String>) -> u32 {
     let mut problems = 0;
 
     let project = root.join(".workz.toml");
@@ -45,14 +63,14 @@ fn check_config(root: &Path) -> u32 {
             .map_err(|e| e.to_string())
             .and_then(|c| toml::from_str::<toml::Value>(&c).map_err(|e| e.to_string()))
         {
-            Ok(_) => println!("[ok] .workz.toml parses"),
+            Ok(_) => out.push("[ok] .workz.toml parses".to_string()),
             Err(e) => {
-                println!("[fail] .workz.toml does not parse: {e}");
+                out.push(format!("[fail] .workz.toml does not parse: {e}"));
                 problems += 1;
             }
         }
     } else {
-        println!("[ok] no .workz.toml (using defaults)");
+        out.push("[ok] no .workz.toml (using defaults)".to_string());
     }
 
     if let Some(global) = dirs::config_dir().map(|d| d.join("workz").join("config.toml")) {
@@ -61,9 +79,9 @@ fn check_config(root: &Path) -> u32 {
                 .map_err(|e| e.to_string())
                 .and_then(|c| toml::from_str::<toml::Value>(&c).map_err(|e| e.to_string()))
             {
-                Ok(_) => println!("[ok] global config parses"),
+                Ok(_) => out.push("[ok] global config parses".to_string()),
                 Err(e) => {
-                    println!("[fail] global config does not parse: {e}");
+                    out.push(format!("[fail] global config does not parse: {e}"));
                     problems += 1;
                 }
             }
@@ -75,45 +93,45 @@ fn check_config(root: &Path) -> u32 {
 
 // ── ports ────────────────────────────────────────────────────────────────────
 
-fn check_orphaned_ports(fix: bool) -> u32 {
+fn check_orphaned_ports(fix: bool, out: &mut Vec<String>) -> u32 {
     let registry = isolation::load_registry();
     let orphans = isolation::orphaned_allocations(&registry, |p| Path::new(p).exists());
 
     if orphans.is_empty() {
-        println!("[ok] no orphaned port allocations");
+        out.push("[ok] no orphaned port allocations".to_string());
         return 0;
     }
 
     if fix {
         match isolation::release_slugs(&orphans) {
             Ok(n) => {
-                println!("[ok] released {n} orphaned port allocation(s): {}", orphans.join(", "));
+                out.push(format!("[ok] released {n} orphaned port allocation(s): {}", orphans.join(", ")));
                 0
             }
             Err(e) => {
-                println!("[fail] could not release orphaned allocations: {e}");
+                out.push(format!("[fail] could not release orphaned allocations: {e}"));
                 1
             }
         }
     } else {
-        println!(
+        out.push(format!(
             "[warn] {} orphaned port allocation(s) (worktree gone): {}",
             orphans.len(),
             orphans.join(", ")
-        );
+        ));
         1
     }
 }
 
 // ── worktrees: broken symlinks + stale refs ──────────────────────────────────
 
-fn check_worktrees(root: &Path, fix: bool) -> u32 {
+fn check_worktrees(root: &Path, fix: bool, out: &mut Vec<String>) -> u32 {
     let mut problems = 0;
 
     let worktrees = match git::worktree_list() {
         Ok(w) => w,
         Err(e) => {
-            println!("[fail] could not list worktrees: {e}");
+            out.push(format!("[fail] could not list worktrees: {e}"));
             return 1;
         }
     };
@@ -124,17 +142,17 @@ fn check_worktrees(root: &Path, fix: bool) -> u32 {
         .filter(|w| !w.is_bare && !w.path.exists())
         .collect();
     if stale.is_empty() {
-        println!("[ok] no stale worktree refs");
+        out.push("[ok] no stale worktree refs".to_string());
     } else if fix {
         match git::worktree_prune() {
-            Ok(_) => println!("[ok] pruned {} stale worktree ref(s)", stale.len()),
+            Ok(_) => out.push(format!("[ok] pruned {} stale worktree ref(s)", stale.len())),
             Err(e) => {
-                println!("[fail] could not prune worktrees: {e}");
+                out.push(format!("[fail] could not prune worktrees: {e}"));
                 problems += 1;
             }
         }
     } else {
-        println!("[warn] {} stale worktree ref(s) — run: workz clean", stale.len());
+        out.push(format!("[warn] {} stale worktree ref(s) — run: workz clean", stale.len()));
         problems += 1;
     }
 
@@ -146,16 +164,16 @@ fn check_worktrees(root: &Path, fix: bool) -> u32 {
             broken_total += 1;
             if fix {
                 match std::fs::remove_file(link) {
-                    Ok(_) => println!("[ok] removed broken symlink {}", link.display()),
-                    Err(e) => println!("[fail] could not remove {}: {e}", link.display()),
+                    Ok(_) => out.push(format!("[ok] removed broken symlink {}", link.display())),
+                    Err(e) => out.push(format!("[fail] could not remove {}: {e}", link.display())),
                 }
             } else {
-                println!("[warn] broken symlink {} — run: workz sync (or doctor --fix)", link.display());
+                out.push(format!("[warn] broken symlink {} — run: workz sync (or doctor --fix)", link.display()));
             }
         }
     }
     if broken_total == 0 {
-        println!("[ok] no broken symlinks in worktrees");
+        out.push("[ok] no broken symlinks in worktrees".to_string());
     } else if !fix {
         problems += broken_total;
     }
@@ -188,13 +206,13 @@ pub fn broken_symlinks(dir: &Path) -> Vec<PathBuf> {
 
 // ── tooling ──────────────────────────────────────────────────────────────────
 
-fn check_tooling() {
+fn check_tooling(out: &mut Vec<String>) {
     // git got us this far. Report optional tools used by --isolated DB features.
     for tool in ["dropdb", "createdb"] {
         if which_exists(tool) {
-            println!("[ok] {tool} available (for --isolated database cleanup)");
+            out.push(format!("[ok] {tool} available (for --isolated database cleanup)"));
         } else {
-            println!("[warn] {tool} not found — --cleanup-db / DB creation will be skipped");
+            out.push(format!("[warn] {tool} not found — --cleanup-db / DB creation will be skipped"));
         }
     }
 }

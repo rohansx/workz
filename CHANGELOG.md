@@ -29,6 +29,8 @@ All notable changes to workz are documented here. This project adheres to
 - **MCP `workz_sync` retargeted.** It now accepts `isolated` and returns the same
   structured JSON as the CLI (`worktree`, `branch`, `symlinked`, `copied`, `installed`,
   `isolation`, `warnings`) so agents can allocate an isolated environment in one call.
+- **New MCP tool `workz_doctor`** — agents can self-diagnose a broken worktree environment
+  (dangling symlinks, orphaned ports, stale refs, unparseable config); read-only.
 
 ## [0.10.0] ("The Hook Release")
 

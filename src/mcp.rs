@@ -296,6 +296,8 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
             Ok(format!("removed worktree at {}", wt_path.display()))
         }
 
+        "workz_doctor" => crate::doctor::report(),
+
         "workz_conflicts" => {
             let conflicts = git::find_conflicts()?;
             if conflicts.is_empty() {
@@ -366,6 +368,11 @@ fn tool_definitions() -> Value {
         {
             "name": "workz_conflicts",
             "description": "Detect files modified in multiple worktrees simultaneously — potential merge conflicts before they happen.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "workz_doctor",
+            "description": "Diagnose a broken worktree environment: dangling symlinks, orphaned port allocations, stale worktree refs, and unparseable config. Read-only (does not apply fixes).",
             "inputSchema": { "type": "object", "properties": {} }
         }
     ])
