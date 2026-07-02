@@ -156,7 +156,8 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
             git::worktree_add(&wt_path, branch, base)?;
 
             let framework = if !no_sync {
-                sync::sync_worktree(&root, &wt_path, &config.sync)?
+                sync::sync_worktree(&root, &wt_path, &config.sync, sync::SyncOptions::default())?
+                    .framework
             } else {
                 sync::Framework::Unknown
             };
@@ -235,8 +236,22 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
                 anyhow::bail!("cannot sync the main worktree");
             }
             let config = config::load_config(&root)?;
-            let _framework = sync::sync_worktree(&root, &path, &config.sync)?;
-            Ok(format!("synced worktree at {}", path.display()))
+            let report =
+                sync::sync_worktree(&root, &path, &config.sync, sync::SyncOptions::default())?;
+            let mut out = format!("synced worktree at {}", path.display());
+            if !report.symlinked.is_empty() {
+                out.push_str(&format!("\nsymlinked: {}", report.symlinked.join(", ")));
+            }
+            if !report.copied.is_empty() {
+                out.push_str(&format!("\ncopied: {}", report.copied.join(", ")));
+            }
+            if let Some(cmd) = &report.installed {
+                out.push_str(&format!("\ninstalled: {cmd}"));
+            }
+            for w in &report.warnings {
+                out.push_str(&format!("\nwarning: {w}"));
+            }
+            Ok(out)
         }
 
         "workz_done" => {

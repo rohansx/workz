@@ -4,8 +4,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(
     name = "workz",
     version,
-    about = "Zoxide for Git worktrees — zero-config sync, fuzzy switching, AI-ready",
-    after_help = "Add shell integration with: eval \"$(workz init zsh)\""
+    about = "The environment engine for agent worktrees — zero-config dep sync + port/DB isolation",
+    after_help = "Add shell integration with: eval \"$(workz shell-init zsh)\""
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -73,8 +73,27 @@ pub enum Commands {
         cleanup_db: bool,
     },
 
-    /// Sync symlinks, env files, and deps into the current worktree
-    Sync,
+    /// Sync symlinks, env files, and deps into a worktree (the hook other tools call)
+    Sync {
+        /// Worktree path to sync (defaults to the current directory)
+        path: Option<std::path::PathBuf>,
+
+        /// Also allocate an isolated PORT range, DB_NAME, COMPOSE_PROJECT_NAME
+        #[arg(long)]
+        isolated: bool,
+
+        /// Emit a single JSON object describing what was synced
+        #[arg(long)]
+        json: bool,
+
+        /// Suppress success output (warnings still go to stderr)
+        #[arg(long)]
+        quiet: bool,
+
+        /// Skip dependency auto-install (symlink + copy only)
+        #[arg(long)]
+        no_install: bool,
+    },
 
     /// Show rich status of all worktrees
     Status,
@@ -90,28 +109,12 @@ pub enum Commands {
         base: Option<String>,
     },
 
-    /// Run parallel AI agents across multiple worktrees
-    Fleet {
-        #[command(subcommand)]
-        cmd: FleetCmd,
-    },
-
-    /// Start a local web dashboard at localhost:PORT
-    Serve {
-        /// Port to listen on
-        #[arg(short, long, default_value = "7777")]
-        port: u16,
-
-        /// Don't automatically open the browser
-        #[arg(long)]
-        no_open: bool,
-    },
-
     /// Start an MCP server exposing workz tools to AI agents (stdio transport)
     Mcp,
 
-    /// Print shell integration script
-    Init {
+    /// Print shell integration script (add: eval "$(workz shell-init zsh)")
+    #[command(name = "shell-init", alias = "init")]
+    ShellInit {
         /// Shell to generate integration for
         #[arg(value_enum)]
         shell: Shell,
@@ -134,75 +137,6 @@ pub enum AiTool {
     Codex,
     Gemini,
     Windsurf,
-}
-
-#[derive(Subcommand)]
-pub enum FleetCmd {
-    /// Create worktrees and launch an AI agent for each task in parallel
-    Start {
-        /// Task description (repeat for multiple tasks: --task "..." --task "...")
-        #[arg(long = "task", action = clap::ArgAction::Append)]
-        tasks: Vec<String>,
-
-        /// Load tasks from a file (one task per non-empty line)
-        #[arg(long)]
-        from: Option<std::path::PathBuf>,
-
-        /// AI agent to launch for every task
-        #[arg(long, default_value = "claude", value_enum)]
-        agent: AiTool,
-
-        /// Base branch to create all worktrees from
-        #[arg(long)]
-        base: Option<String>,
-    },
-
-    /// Show status of all fleet worktrees
-    Status,
-
-    /// Run a shell command in every fleet worktree in parallel
-    Run {
-        /// Command to execute (e.g. "cargo test")
-        #[arg(required = true, trailing_var_arg = true)]
-        cmd: Vec<String>,
-    },
-
-    /// Remove all fleet worktrees and clean up
-    Done {
-        /// Force removal even with uncommitted changes
-        #[arg(short, long)]
-        force: bool,
-    },
-
-    /// Interactively merge completed fleet worktrees into the base branch
-    Merge {
-        /// Base branch to merge into (defaults to main or master)
-        #[arg(long)]
-        base: Option<String>,
-
-        /// Squash all commits per worktree into one merge commit
-        #[arg(long)]
-        squash: bool,
-
-        /// Merge all worktrees without interactive selection
-        #[arg(long)]
-        all: bool,
-    },
-
-    /// Create a GitHub PR for each fleet worktree
-    Pr {
-        /// Base branch for the PRs (defaults to main or master)
-        #[arg(long)]
-        base: Option<String>,
-
-        /// Create as draft PRs
-        #[arg(long)]
-        draft: bool,
-
-        /// Create PRs for all worktrees without interactive selection
-        #[arg(long)]
-        all: bool,
-    },
 }
 
 impl std::fmt::Display for AiTool {

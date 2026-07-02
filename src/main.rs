@@ -1,16 +1,13 @@
 mod cli;
 mod config;
-mod fleet;
 mod git;
 mod isolation;
 mod mcp;
-mod serve;
 mod sync;
-mod tui;
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use cli::{AiTool, Commands, FleetCmd, Shell};
+use cli::{AiTool, Commands, Shell};
 use skim::prelude::*;
 use std::io::Cursor;
 use std::process::Command;
@@ -21,8 +18,9 @@ const CD_PREFIX: &str = "__workz_cd:";
 fn main() -> Result<()> {
     let cli = cli::Cli::parse();
 
+    // Bare `workz` prints the status table.
     let Some(command) = cli.command else {
-        return tui::run_dashboard();
+        return cmd_status();
     };
 
     match command {
@@ -43,26 +41,17 @@ fn main() -> Result<()> {
             delete_branch,
             cleanup_db,
         } => cmd_done(branch.as_deref(), force, delete_branch, cleanup_db),
-        Commands::Sync => cmd_sync(),
+        Commands::Sync {
+            path,
+            isolated,
+            json,
+            quiet,
+            no_install,
+        } => cmd_sync(path.as_deref(), isolated, json, quiet, no_install),
         Commands::Status => cmd_status(),
         Commands::Clean { merged, base } => cmd_clean(merged, base.as_deref()),
-        Commands::Fleet { cmd } => match cmd {
-            FleetCmd::Start { mut tasks, from, agent, base } => {
-                if let Some(path) = from {
-                    let mut file_tasks = fleet::parse_task_file(&path)?;
-                    tasks.append(&mut file_tasks);
-                }
-                fleet::cmd_start(tasks, &agent, base.as_deref())
-            }
-            FleetCmd::Status => fleet::cmd_status(),
-            FleetCmd::Run { cmd } => fleet::cmd_run(&cmd),
-            FleetCmd::Done { force } => fleet::cmd_done(force),
-            FleetCmd::Merge { base, squash, all } => fleet::cmd_merge(base.as_deref(), squash, all),
-            FleetCmd::Pr { base, draft, all } => fleet::cmd_pr(base.as_deref(), draft, all),
-        },
-        Commands::Serve { port, no_open } => serve::run(port, no_open),
         Commands::Mcp => mcp::run(),
-        Commands::Init { shell } => cmd_init(&shell),
+        Commands::ShellInit { shell } => cmd_init(&shell),
     }
 }
 
@@ -94,7 +83,12 @@ fn cmd_start(
     let config = config::load_config(&root)?;
 
     let framework = if !no_sync {
-        let fw = sync::sync_worktree(&root, &wt_path, &config.sync)?;
+        let report =
+            sync::sync_worktree(&root, &wt_path, &config.sync, sync::SyncOptions::default())?;
+        println!("{}", report.human_summary());
+        for w in &report.warnings {
+            eprintln!("  warning: {w}");
+        }
 
         // Run post_start hook if configured
         if let Some(hook) = &config.hooks.post_start {
@@ -107,7 +101,7 @@ fn cmd_start(
                 eprintln!("  warning: post_start hook exited with {}", status);
             }
         }
-        fw
+        report.framework
     } else {
         sync::Framework::Unknown
     };
@@ -437,18 +431,89 @@ fn stop_docker(path: &std::path::Path) {
 
 // ── sync ───────────────────────────────────────────────────────────────
 
-fn cmd_sync() -> Result<()> {
+fn cmd_sync(
+    path: Option<&std::path::Path>,
+    isolated: bool,
+    json: bool,
+    quiet: bool,
+    no_install: bool,
+) -> Result<()> {
     let root = git::repo_root()?;
-    let cwd = std::env::current_dir()?;
+    let target = match path {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    let target = target.canonicalize().unwrap_or(target);
 
-    if cwd == root {
-        bail!("you're in the main worktree — switch to a worktree first");
+    if target == root {
+        bail!("that's the main worktree — pass a worktree path or run from inside one");
     }
 
     let config = config::load_config(&root)?;
-    println!("syncing worktree at {}", cwd.display());
-    let _framework = sync::sync_worktree(&root, &cwd, &config.sync)?;
-    println!("done!");
+    let opts = sync::SyncOptions { no_install, quiet };
+    let report = sync::sync_worktree(&root, &target, &config.sync, opts)?;
+
+    // Resolve the branch (used for isolation + JSON output).
+    let branch = git::current_branch(&target).unwrap_or_default();
+
+    // Optionally allocate an isolated environment.
+    let iso = if isolated {
+        Some(isolation::setup_isolation(
+            &branch,
+            &target,
+            config.isolation.port_range_size,
+            report.framework,
+        )?)
+    } else {
+        None
+    };
+
+    if json {
+        let iso_json = match &iso {
+            Some(i) => serde_json::json!({
+                "port": i.port,
+                "port_end": i.port_end,
+                "port_count": i.port_count,
+                "db_name": i.db_name,
+                "compose_project": i.compose_project,
+                "env_file": ".env.local",
+            }),
+            None => serde_json::Value::Null,
+        };
+        let out = serde_json::json!({
+            "worktree": target.to_string_lossy(),
+            "branch": branch,
+            "symlinked": report.symlinked,
+            "copied": report.copied,
+            "installed": report.installed,
+            "isolation": iso_json,
+            "warnings": report.warnings,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if !quiet {
+        println!("synced {}", target.display());
+        println!("{}", report.human_summary());
+        if let Some(i) = &iso {
+            let range = if i.port_count > 1 {
+                format!("{}-{}", i.port, i.port_end)
+            } else {
+                i.port.to_string()
+            };
+            println!(
+                "  isolated: PORT={} DB_NAME={} COMPOSE_PROJECT_NAME={} → .env.local",
+                range, i.db_name, i.compose_project
+            );
+        }
+    }
+
+    // Warnings always surface on stderr, even under --quiet.
+    for w in &report.warnings {
+        eprintln!("  warning: {w}");
+    }
+
     Ok(())
 }
 
@@ -561,7 +626,7 @@ fn cmd_init(shell: &Shell) -> Result<()> {
 
 const SHELL_INIT_BASH: &str = r#"# workz shell integration
 # Add to your .bashrc or .zshrc:
-#   eval "$(workz init zsh)"
+#   eval "$(workz shell-init zsh)"
 
 workz() {
     local result
@@ -604,7 +669,8 @@ if [ -n "$ZSH_VERSION" ]; then
             'status:Show rich status of all worktrees'
             'done:Remove a worktree'
             'clean:Prune orphaned worktrees'
-            'init:Print shell integration script'
+            'mcp:Start the MCP server for AI agents'
+            'shell-init:Print shell integration script'
         )
 
         if (( CURRENT == 2 )); then
@@ -640,7 +706,7 @@ if [ -n "$ZSH_VERSION" ]; then
                     '--merged[Remove worktrees with merged branches]' \
                     '--base[Base branch]:branch:'
                 ;;
-            init)
+            shell-init|init)
                 compadd -- zsh bash fish
                 ;;
         esac
@@ -653,7 +719,7 @@ else
         prev="${COMP_WORDS[COMP_CWORD-1]}"
 
         if [[ ${COMP_CWORD} -eq 1 ]]; then
-            COMPREPLY=($(compgen -W "start list ls switch s sync status done clean init" -- "$cur"))
+            COMPREPLY=($(compgen -W "start list ls switch s sync status done clean mcp shell-init" -- "$cur"))
             return
         fi
 
@@ -673,7 +739,7 @@ else
             clean)
                 COMPREPLY=($(compgen -W "--merged --base" -- "$cur"))
                 ;;
-            init)
+            shell-init|init)
                 COMPREPLY=($(compgen -W "zsh bash fish" -- "$cur"))
                 ;;
         esac
@@ -684,7 +750,7 @@ fi
 
 const SHELL_INIT_FISH: &str = r#"# workz shell integration
 # Add to your config.fish:
-#   workz init fish | source
+#   workz shell-init fish | source
 
 function workz
     set -l result (command workz $argv 2>&1)
@@ -704,14 +770,15 @@ end
 
 # Tab completions
 complete -c workz -e
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a start -d "Create a new worktree"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a list -d "List all worktrees"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a switch -d "Fuzzy-switch to a worktree"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a sync -d "Sync symlinks, env files, and deps"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a status -d "Show rich status of all worktrees"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a done -d "Remove a worktree"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a clean -d "Prune orphaned worktrees"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean init" -a init -d "Print shell integration script"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a start -d "Create a new worktree"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a list -d "List all worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a switch -d "Fuzzy-switch to a worktree"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a sync -d "Sync symlinks, env files, and deps"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a status -d "Show rich status of all worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a done -d "Remove a worktree"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a clean -d "Prune orphaned worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a mcp -d "Start the MCP server for AI agents"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean mcp shell-init init" -a shell-init -d "Print shell integration script"
 complete -c workz -n "__fish_seen_subcommand_from switch s" -a "(git worktree list --porcelain 2>/dev/null | string match -r '^branch refs/heads/(.+)' | string replace 'branch refs/heads/' '')"
 complete -c workz -n "__fish_seen_subcommand_from done" -a "(git worktree list --porcelain 2>/dev/null | string match -r '^branch refs/heads/(.+)' | string replace 'branch refs/heads/' '')"
 complete -c workz -n "__fish_seen_subcommand_from start" -l base -d "Base branch"
@@ -723,5 +790,5 @@ complete -c workz -n "__fish_seen_subcommand_from start" -l isolated -d "Auto-as
 complete -c workz -n "__fish_seen_subcommand_from done" -l cleanup-db -d "Drop the database created by --isolated"
 complete -c workz -n "__fish_seen_subcommand_from clean" -l merged -d "Remove worktrees with merged branches"
 complete -c workz -n "__fish_seen_subcommand_from clean" -l base -d "Base branch to check merged against"
-complete -c workz -n "__fish_seen_subcommand_from init" -a "zsh bash fish"
+complete -c workz -n "__fish_seen_subcommand_from shell-init init" -a "zsh bash fish"
 "#;

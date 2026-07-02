@@ -1,26 +1,85 @@
 # workz
 
-**Git worktree manager for AI-native development** — auto-synced dependencies, environment isolation, fleet orchestration, and a lazygit-style TUI.
+**The environment engine for agent worktrees.** Your agent creates the worktree —
+workz makes it *run*: dependencies linked, `.env` copied, a unique port range, its own
+database and compose project. Zero config.
 
 ![workz CLI demo](demo.gif)
 
-## The Problem
+## The problem
+
+Claude Code, Cursor, and Codex all create git worktrees for parallel work now. But a
+fresh worktree is inert:
 
 ```bash
 git worktree add ../my-feature feature/login
 cd ../my-feature
-# Where's my .env? Gone.
-# Where's node_modules? Gone. Time to wait for npm install again.
-# Another 2GB of disk space wasted on duplicate dependencies.
-# What port should this run on? Same as the other worktree?
+# Where's .env? Gone.
+# node_modules? Gone — reinstall and wait, or waste 2GB duplicating it.
+# What port does the dev server use? The same one as every other worktree.
+# The database? Shared — one agent's migration breaks the others.
 ```
 
-## The Fix
+Every one of those tools ships a *worktree-create hook* and tells you to write the
+setup command yourself. **workz is that command.**
+
+## The fix
 
 ```bash
-workz start feature/login --isolated
-# .env files copied, node_modules symlinked, PORT=3000-3009 assigned, you're in. Done.
+workz sync --isolated
+# node_modules symlinked, .env copied, PORT=3010-3019 + DB_NAME + COMPOSE_PROJECT_NAME
+# written to .env.local — idempotent, safe to run again.
 ```
+
+Use it standalone, or wire it into your agent's hook so every new worktree is runnable
+the moment it exists.
+
+## Use it as a hook
+
+Let your editor/agent create worktrees natively; point its setup hook at `workz sync`.
+
+**Cursor** — `.cursor/worktrees.json`:
+
+```json
+{ "setup-worktree": ["workz", "sync", "--isolated", "--quiet"] }
+```
+
+**worktrunk** (`wt`) — in your worktrunk config:
+
+```toml
+[hooks]
+create = "workz sync --isolated --quiet"
+```
+
+**Claude Code** — add a `WorktreeCreate` hook in `.claude/settings.json` that runs:
+
+```bash
+workz sync --isolated --quiet "$WORKTREE_PATH"
+```
+
+**Anything else** — any tool that runs a command after creating a worktree:
+
+```bash
+workz sync --isolated --quiet <path>
+```
+
+`--json` makes the output machine-readable for scripting; `--quiet` keeps success
+output silent (warnings still go to stderr).
+
+## Use it standalone
+
+```bash
+workz start feature/login             # create worktree + auto-sync deps & env
+workz start feature/auth --isolated   # + assign PORT range, DB_NAME, COMPOSE_PROJECT_NAME
+workz start feature/api --docker      # + docker compose up
+workz start feature/ui --ai           # + launch Claude Code (or --ai-tool cursor/aider/codex/…)
+```
+
+What `start` does:
+1. Creates `../myrepo--feature-login` as a git worktree.
+2. Symlinks `node_modules`, `target`, `.venv`, … (project-aware, never duplicated).
+3. Copies `.env*` and other untracked config into the worktree.
+4. With `--isolated`, allocates a PORT range + DB + compose project into `.env.local`.
 
 ## Install
 
@@ -33,214 +92,76 @@ brew install workz
 cargo install workz
 ```
 
-Or build from source:
+Build from source:
 
 ```bash
 git clone https://github.com/rohansx/workz.git
 cd workz && cargo install --path .
 ```
 
-## Shell Setup
+## Shell setup
+
+Adds a `cd`-on-switch wrapper and tab completions:
 
 ```bash
 # zsh (~/.zshrc) or bash (~/.bashrc)
-eval "$(workz init zsh)"
+eval "$(workz shell-init zsh)"
 
 # fish (~/.config/fish/config.fish)
-workz init fish | source
+workz shell-init fish | source
 ```
 
-## TUI Dashboard
+## Commands
 
-Run `workz` with no arguments to launch the dashboard:
+| Command | Does |
+|---------|------|
+| `workz` / `workz status` | Status of every worktree: branch, dirty state, size, port range |
+| `workz start <branch>` | Create a worktree + sync (`--isolated`, `--docker`, `--ai`, `--base`, `--no-sync`) |
+| `workz sync [path]` | Make a worktree runnable — the hook command (`--isolated`, `--json`, `--quiet`, `--no-install`) |
+| `workz switch [query]` | Fuzzy-switch between worktrees (aliased `s`) |
+| `workz list` | List worktrees with size and status (aliased `ls`) |
+| `workz done [branch]` | Remove a worktree (`--force`, `--delete-branch`, `--cleanup-db`) |
+| `workz clean` | Prune stale worktrees (`--merged` also removes merged branches) |
+| `workz mcp` | Run the MCP server (see below) |
+| `workz shell-init <shell>` | Print shell integration for zsh/bash/fish |
 
-```bash
-workz
-```
+## Environment isolation
 
-![workz TUI dashboard](demo-tui.gif)
-
-4 panels show everything at a glance:
-
-| Panel | Shows |
-|-------|-------|
-| **Worktrees** | All branches, dirty state, port allocations, last commit |
-| **Fleet** | Parallel AI agent tasks, running/modified/clean status |
-| **Files** | Modified files for the selected worktree (M/A/D/??) |
-| **Ports** | Isolated port ranges and database names |
-
-| Key | Action |
-|-----|--------|
-| `Tab` / `Shift+Tab` | Cycle panels |
-| `j` / `k` | Navigate within panel |
-| `n` | New worktree |
-| `d` | Delete worktree |
-| `s` | Sync worktree |
-| `r` | Refresh all |
-| `?` | Help |
-| `q` | Quit |
-
-## Usage
-
-### Create a worktree
-
-```bash
-workz start feature/login            # create + auto-sync deps
-workz start feature/auth --isolated  # create + assign PORT range + DB_NAME
-workz start feature/api --ai         # create + launch Claude Code
-workz start feature/ui --docker      # create + docker compose up
-```
-
-What happens:
-1. Creates `../myrepo--feature-login` as a git worktree
-2. Symlinks `node_modules`, `target`, `.venv` (project-aware, not duplicated)
-3. Copies `.env*` files into the new worktree
-4. Optionally assigns isolated PORT range, DB_NAME, COMPOSE_PROJECT_NAME
-
-### List and switch
-
-```bash
-workz list              # show all worktrees with size and status
-workz switch            # fzf-style fuzzy finder
-workz switch login      # pre-fills query
-workz status            # rich status with ports, docker, commit age
-```
-
-### Remove a worktree
-
-```bash
-workz done                        # remove current worktree
-workz done feature/login --force  # force-remove with uncommitted changes
-workz done feature/login -d       # also delete the branch
-workz done feature/login --cleanup-db  # also drop the isolated database
-```
-
-### Sync existing worktrees
-
-```bash
-cd ../my-existing-worktree
-workz sync   # applies symlinks, copies .env, installs deps
-```
-
-### Clean up
-
-```bash
-workz clean                  # prune stale worktree refs
-workz clean --merged         # also remove merged branches
-```
-
-## Environment Isolation
-
-`--isolated` gives each worktree its own port range, database, and compose project — no collisions between worktrees.
+`--isolated` gives each worktree its own port range, database, and compose project — no
+collisions between parallel worktrees.
 
 ```bash
 workz start feat/auth --isolated
-# PORT=3000  PORT_END=3009  DB_NAME=feat_auth  COMPOSE_PROJECT_NAME=feat_auth
+# PORT=3010  PORT_END=3019  DB_NAME=feat_auth  COMPOSE_PROJECT_NAME=feat_auth
 
 workz start feat/api --isolated
-# PORT=3010  PORT_END=3019  DB_NAME=feat_api   COMPOSE_PROJECT_NAME=feat_api
+# PORT=3020  PORT_END=3029  DB_NAME=feat_api   COMPOSE_PROJECT_NAME=feat_api
 ```
 
-All values are written to `.env.local` in the worktree. workz detects 14 web frameworks and writes framework-specific variables:
+Values are written into a **managed block** in `.env.local`, so isolation vars sit
+alongside — and never overwrite — your own copied secrets:
 
-| Framework | Extra env var |
-|-----------|--------------|
-| Spring Boot | `SERVER_PORT` |
-| Flask | `FLASK_RUN_PORT` |
-| FastAPI | `UVICORN_PORT` |
-| Vite | `VITE_PORT` |
+```dotenv
+API_KEY=your-real-secret          # preserved, untouched
 
-Port ranges are allocated in aligned 10-port blocks (configurable) and tracked in `~/.config/workz/ports.json`. Released automatically on `workz done`.
-
-## Fleet Mode
-
-Orchestrate parallel AI agents across isolated worktrees.
-
-```bash
-# Spin up 3 Claude agents in parallel
-workz fleet start \
-  --task "add user authentication" \
-  --task "write integration tests" \
-  --task "refactor database layer" \
-  --agent claude
-
-# Watch all agents live
-workz fleet status
-
-# Run tests across all fleet worktrees
-workz fleet run "cargo test"
-
-# Merge completed work back
-workz fleet merge
-
-# Or open a PR for each
-workz fleet pr --draft
-
-# Tear it all down
-workz fleet done
+# >>> workz managed — do not edit between these markers >>>
+PORT=3010
+PORT_END=3019
+DB_NAME=feat_auth
+DATABASE_URL=postgres://localhost/feat_auth
+COMPOSE_PROJECT_NAME=feat_auth
+REDIS_URL=redis://localhost:3011
+# <<< workz managed <<<
 ```
 
-Load tasks from a file:
+Re-running `--isolated` only rewrites the managed block. Port ranges are tracked in
+`~/.config/workz/ports.json` and released on `workz done`. workz also detects common
+web frameworks and writes their port var (`VITE_PORT`, `SERVER_PORT`, `FLASK_RUN_PORT`,
+`UVICORN_PORT`, …).
 
-```bash
-workz fleet start --from tasks.txt --agent claude
-```
+## What gets synced
 
-## AI Agent Workflow
-
-Launch any AI coding tool in a fresh worktree:
-
-```bash
-workz start feature/auth --ai                    # Claude Code (default)
-workz start feature/ui --ai --ai-tool cursor     # Cursor
-workz start feature/api --ai --ai-tool aider     # Aider
-workz start feature/test --ai --ai-tool codex    # OpenAI Codex CLI
-workz start feature/x --ai --ai-tool gemini      # Gemini CLI
-workz start feature/y --ai --ai-tool windsurf    # Windsurf
-```
-
-## MCP Server
-
-workz ships a built-in MCP server so AI agents can manage worktrees autonomously.
-
-```bash
-claude mcp add workz -- workz mcp
-```
-
-Or add to `~/.claude/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "workz": {
-      "command": "workz",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-### Tools exposed
-
-| Tool | Description |
-|------|-------------|
-| `workz_start` | Create a worktree (supports `--isolated`) |
-| `workz_list` | List all worktrees as JSON |
-| `workz_status` | Branch, dirty state, last commit |
-| `workz_sync` | Re-sync symlinks/env into a worktree |
-| `workz_done` | Remove a worktree (optional force) |
-| `workz_conflicts` | Detect files modified in multiple worktrees |
-
-## Web Dashboard
-
-```bash
-workz serve           # localhost:7777
-workz serve -p 8080   # custom port
-```
-
-## What Gets Synced
-
-**Symlinked directories** (27 dirs, project-type aware — only syncs what's relevant):
+**Symlinked** (project-type aware — only what's relevant is linked):
 
 | Project | Directories |
 |---------|------------|
@@ -252,21 +173,11 @@ workz serve -p 8080   # custom port
 | General | `.direnv`, `.cache` |
 | IDE | `.vscode`, `.idea`, `.cursor`, `.claude`, `.zed` |
 
-**Copied files** (17 patterns):
-`.env`, `.env.*`, `.envrc`, `.tool-versions`, `.node-version`, `.python-version`, `.ruby-version`, `.nvmrc`, `.npmrc`, `.yarnrc.yml`, `docker-compose.override.yml`, `.secrets`, `.secrets.*`
+**Copied**: `.env`, `.env.*`, `.envrc`, `.tool-versions`, `.node-version`, `.npmrc`,
+`.yarnrc.yml`, `docker-compose.override.yml`, `.secrets*`, and more.
 
-**Auto-install** (detected from lockfiles):
-
-| Lockfile | Command |
-|----------|---------|
-| `bun.lockb` / `bun.lock` | `bun install --frozen-lockfile` |
-| `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` |
-| `yarn.lock` | `yarn install --frozen-lockfile` |
-| `package-lock.json` | `npm ci` |
-| `uv.lock` | `uv sync` |
-| `Pipfile.lock` | `pipenv install` |
-| `poetry.lock` | `poetry install` |
-| `requirements.txt` | `pip install -r requirements.txt` |
+**Auto-installed** from the detected lockfile (`bun` / `pnpm` / `yarn` / `npm ci` /
+`uv` / `poetry` / `pipenv` / `pip`). Skip with `--no-install`.
 
 ## Configuration
 
@@ -290,15 +201,29 @@ port_range_size = 10   # ports per worktree (default: 10)
 base_port = 3000       # first port (default: 3000)
 ```
 
-Zero config works out of the box for Node, Rust, Python, Go, and Java projects.
+Zero config works out of the box for Node, Rust, Python, Go, and Java.
 
-## Docker Support
+## MCP server
+
+workz ships an MCP server so agents can manage worktrees themselves:
 
 ```bash
-workz start feature/api --docker   # creates worktree + runs docker compose up -d
+claude mcp add workz -- workz mcp
+```
+
+Exposes `workz_start`, `workz_sync`, `workz_list`, `workz_status`, `workz_done`, and
+`workz_conflicts` (files modified in more than one worktree — merge conflicts before
+they happen).
+
+## Docker
+
+```bash
+workz start feature/api --docker   # worktree + docker compose up -d
 workz done feature/api             # stops containers + removes worktree
 ```
 
-Supports both `docker compose` and `podman-compose`.
+Supports `docker compose` and `podman-compose`.
 
+---
 
+MIT OR Apache-2.0. Where workz is headed and why it's shaped this way: [`V2.md`](V2.md).
