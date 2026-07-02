@@ -1,3 +1,5 @@
 /target
 /docs/*
 /demo/
+# local launch/strategy drafts (not product)
+/launch/
