@@ -63,7 +63,15 @@ workz sync --isolated --quiet "$WORKTREE_PATH"
 workz sync --isolated --quiet <path>
 ```
 
-`--json` makes the output machine-readable for scripting; `--quiet` keeps success
+Don't want to write the config by hand? `workz hook <host>` prints the exact recipe,
+and `workz hook cursor --install` writes it for you:
+
+```bash
+workz hook claude       # print the Claude Code WorktreeCreate hook
+workz hook cursor --install   # write .cursor/worktrees.json
+```
+
+`--json` makes the sync output machine-readable for scripting; `--quiet` keeps success
 output silent (warnings still go to stderr).
 
 ## Use it standalone
@@ -123,6 +131,7 @@ workz shell-init fish | source
 | `workz done [branch]` | Remove a worktree (`--force`, `--delete-branch`, `--cleanup-db`) |
 | `workz clean` | Prune stale worktrees (`--merged` also removes merged branches) |
 | `workz doctor` | Diagnose broken symlinks, orphaned ports, stale config (`--fix` repairs) |
+| `workz hook <host>` | Print/install the worktree-hook recipe for a host (`--install`) |
 | `workz mcp` | Run the MCP server (see below) |
 | `workz shell-init <shell>` | Print shell integration for zsh/bash/fish |
 

@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod doctor;
 mod git;
+mod hook;
 mod isolation;
 mod mcp;
 mod sync;
@@ -58,6 +59,7 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Commands::Hook { host, install } => hook::run(host, install),
         Commands::Mcp => mcp::run(),
         Commands::ShellInit { shell } => cmd_init(&shell),
     }

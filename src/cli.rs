@@ -116,6 +116,17 @@ pub enum Commands {
         fix: bool,
     },
 
+    /// Print (or --install) the worktree-hook recipe for a host tool
+    Hook {
+        /// Host tool to wire workz into
+        #[arg(value_enum)]
+        host: HookHost,
+
+        /// Write the config file for hosts that support it (never overwrites)
+        #[arg(long)]
+        install: bool,
+    },
+
     /// Start an MCP server exposing workz tools to AI agents (stdio transport)
     Mcp,
 
@@ -133,6 +144,17 @@ pub enum Shell {
     Zsh,
     Bash,
     Fish,
+}
+
+/// Host tools workz can generate a worktree-create hook recipe for.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum HookHost {
+    Claude,
+    Cursor,
+    Codex,
+    Conductor,
+    Worktrunk,
+    Generic,
 }
 
 #[derive(Clone, ValueEnum)]

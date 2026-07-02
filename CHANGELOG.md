@@ -6,6 +6,11 @@ All notable changes to workz are documented here. This project adheres to
 ## [0.10.0] — unreleased ("The Hook Release")
 
 ### Added
+- **`workz hook <host>`** — print (or `--install`) the worktree-create hook recipe that
+  wires `workz sync --isolated` into a host tool: `claude`, `cursor`, `codex`,
+  `conductor`, `worktrunk`, or `generic`. `--install` writes the dedicated config file
+  for hosts that have one (e.g. Cursor's `.cursor/worktrees.json`) and never overwrites
+  an existing file.
 - **`workz doctor`** — diagnose the things that quietly break worktree setups:
   dangling symlinks inside worktrees, orphaned port allocations (worktree gone),
   stale worktree refs, and unparseable `.workz.toml` / global config. Exit code 1 when
