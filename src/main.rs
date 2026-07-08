@@ -55,7 +55,18 @@ fn main() -> Result<()> {
             force,
             delete_branch,
             cleanup_db,
-        } => cmd_done(branch.as_deref(), force, delete_branch, cleanup_db),
+            no_reap,
+            no_compose_down,
+            compose_volumes,
+        } => cmd_done(
+            branch.as_deref(),
+            force,
+            delete_branch,
+            cleanup_db,
+            no_reap,
+            no_compose_down,
+            compose_volumes,
+        ),
         Commands::Sync {
             path,
             isolated,
@@ -75,6 +86,14 @@ fn main() -> Result<()> {
         ),
         Commands::Status => cmd_status(),
         Commands::Clean { merged, base } => cmd_clean(merged, base.as_deref()),
+        Commands::Reap {
+            branch,
+            all,
+            yes,
+            dry_run,
+            force,
+            json,
+        } => cmd_reap(branch.as_deref(), all, yes, dry_run, force, json),
         Commands::Conflicts => cmd_conflicts(),
         Commands::Doctor { fix } => {
             if doctor::run(fix)? {
@@ -435,7 +454,15 @@ fn cmd_switch(query: Option<&str>) -> Result<()> {
 
 // ── done ───────────────────────────────────────────────────────────────
 
-fn cmd_done(branch: Option<&str>, force: bool, delete_branch: bool, cleanup_db: bool) -> Result<()> {
+fn cmd_done(
+    branch: Option<&str>,
+    force: bool,
+    delete_branch: bool,
+    cleanup_db: bool,
+    no_reap: bool,
+    no_compose_down: bool,
+    compose_volumes: bool,
+) -> Result<()> {
     let root = git::repo_root()?;
 
     let (wt_path, branch_name) = if let Some(b) = branch {
@@ -459,8 +486,18 @@ fn cmd_done(branch: Option<&str>, force: bool, delete_branch: bool, cleanup_db: 
         bail!("worktree has uncommitted changes — use --force to remove anyway");
     }
 
-    // Stop containers if docker-compose exists
-    stop_docker(&wt_path);
+    // Stop containers if docker-compose exists (skippable via --no-compose-down)
+    if !no_compose_down {
+        stop_docker(&wt_path, compose_volumes);
+    }
+
+    // Reap processes bound to the worktree's allocated ports (skippable via --no-reap).
+    // The stateful registry makes this precise — we only touch ports workz allocated,
+    // so a dev server on a port we don't own is never touched.
+    if !no_reap {
+        let report = isolation::reap_branch(&branch_name, force)?;
+        print_reap_summary(&report);
+    }
 
     // Release isolated port allocation (no-op if not isolated)
     let _ = isolation::release_isolation(&branch_name);
@@ -494,7 +531,7 @@ fn cmd_done(branch: Option<&str>, force: bool, delete_branch: bool, cleanup_db: 
     Ok(())
 }
 
-fn stop_docker(path: &std::path::Path) {
+fn stop_docker(path: &std::path::Path, volumes: bool) {
     let has_compose = path.join("docker-compose.yml").exists()
         || path.join("docker-compose.yaml").exists()
         || path.join("compose.yml").exists()
@@ -504,7 +541,7 @@ fn stop_docker(path: &std::path::Path) {
         return;
     }
 
-    let (cmd, args): (&str, Vec<&str>) = if which_exists("podman-compose") {
+    let (cmd, base_args): (&str, Vec<&str>) = if which_exists("podman-compose") {
         ("podman-compose", vec!["down"])
     } else if which_exists("docker") {
         ("docker", vec!["compose", "down"])
@@ -512,11 +549,189 @@ fn stop_docker(path: &std::path::Path) {
         return;
     };
 
-    println!("  stopping containers...");
+    let mut args: Vec<String> = base_args.into_iter().map(String::from).collect();
+    if volumes {
+        args.push("-v".to_string());
+    }
+
+    println!("  stopping containers ({}{})...", cmd, if volumes { " -v" } else { "" });
     let _ = Command::new(cmd)
         .args(&args)
         .current_dir(path)
         .status();
+}
+
+// ── reap ───────────────────────────────────────────────────────────────
+
+/// Build the sorted, de-duplicated list of port numbers we'd reap for the
+/// given target (single branch or every allocation). Returns Ok(vec![]) when
+/// no allocations exist — callers handle that as a no-op.
+fn compute_target_ports(branch: Option<&str>, all: bool) -> Result<Vec<u16>> {
+    let registry = isolation::load_registry();
+    let mut out: Vec<u16> = Vec::new();
+    if all {
+        for a in registry.allocations.values() {
+            for p in a.port..a.port.saturating_add(a.port_count) {
+                out.push(p);
+            }
+        }
+    } else if let Some(b) = branch {
+        let slug = isolation::branch_to_slug(b);
+        if let Some(a) = registry.allocations.get(&slug) {
+            for p in a.port..a.port.saturating_add(a.port_count) {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// Render a ReapReport for humans (CLI). JSON path is handled by the caller.
+fn print_reap_summary(report: &isolation::ReapReport) {
+    if report.killed.is_empty() && report.errors.is_empty() {
+        return; // silent: nothing to do, no need to spam the user
+    }
+    if !report.killed.is_empty() {
+        println!("  reaped {} process(es):", report.killed.len());
+        for k in &report.killed {
+            println!("    pid {} ({}) on port {}", k.pid, k.command, k.port);
+        }
+    }
+    for e in &report.errors {
+        eprintln!("  warning: {e}");
+    }
+}
+
+fn cmd_reap(
+    branch: Option<&str>,
+    all: bool,
+    yes: bool,
+    dry_run: bool,
+    force: bool,
+    json: bool,
+) -> Result<()> {
+    // Resolve the target branch. `--all` reaps every port workz has allocated.
+    let target_branch: Option<String> = if all {
+        None
+    } else if let Some(b) = branch {
+        Some(b.to_string())
+    } else {
+        // Default: reap the current worktree's branch (only if we're inside one).
+        let cwd = std::env::current_dir()?;
+        let root = git::repo_root()?;
+        if cwd == root {
+            bail!(
+                "you're in the main worktree — pass a branch name or --all (or run from inside a worktree)"
+            );
+        }
+        Some(git::current_branch(&cwd)?)
+    };
+
+    // Dry-run: list listeners without killing. Handed off to a side path that
+    // uses the no-side-effect `listeners_on_port` scanner.
+    if dry_run {
+        return cmd_reap_dry_run(target_branch.as_deref(), all, json);
+    }
+
+    // Compute the target port list once so we can both preview it (for the
+    // confirmation prompt) and pass it to the reap call without double-running.
+    let target_ports = compute_target_ports(target_branch.as_deref(), all)?;
+
+    // Interactive confirmation when there's something to kill, unless --yes.
+    if !yes && !json && !target_ports.is_empty() {
+        let preview_count: usize = target_ports
+            .iter()
+            .map(|p| isolation::listeners_on_port(*p).len())
+            .sum();
+        if preview_count == 0 {
+            // Nothing actually listening — silent early return.
+            return Ok(());
+        }
+        eprintln!(
+            "about to kill up to {preview_count} process(es) on {} port(s) — re-run with --yes to skip this prompt",
+            target_ports.len()
+        );
+    }
+
+    let report = if all {
+        isolation::reap_all(force)?
+    } else if let Some(b) = &target_branch {
+        isolation::reap_branch(b, force)?
+    } else {
+        isolation::ReapReport::default()
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    print_reap_summary(&report);
+    Ok(())
+}
+
+/// --dry-run path: scan the target ports for live listeners and report, never
+/// send a signal. Uses the public `listeners_on_port` scanner so there's zero
+/// side effects — unlike `reap_*` which always terminates.
+fn cmd_reap_dry_run(branch: Option<&str>, all: bool, json: bool) -> Result<()> {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct DryLine {
+        branch: String,
+        port: u16,
+        pid: u32,
+        command: String,
+    }
+
+    let registry = isolation::load_registry();
+
+    let entries: Vec<(String, isolation::PortAllocation)> = if all {
+        registry.allocations.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    } else if let Some(b) = branch {
+        let slug = isolation::branch_to_slug(b);
+        match registry.allocations.get(&slug).cloned() {
+            Some(a) => vec![(slug, a)],
+            None => {
+                if !json {
+                    println!("no port allocation for branch '{b}'");
+                }
+                return Ok(());
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let mut lines: Vec<DryLine> = Vec::new();
+    for (slug, alloc) in entries {
+        for port in alloc.port..alloc.port.saturating_add(alloc.port_count) {
+            for l in isolation::listeners_on_port(port) {
+                lines.push(DryLine {
+                    branch: slug.clone(),
+                    port,
+                    pid: l.pid,
+                    command: l.command,
+                });
+            }
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&lines)?);
+        return Ok(());
+    }
+    if lines.is_empty() {
+        println!("no live listeners on allocated ports");
+        return Ok(());
+    }
+    println!("would kill (dry run):");
+    for l in &lines {
+        println!("  pid {} ({}) on port {} [{}]", l.pid, l.command, l.port, l.branch);
+    }
+    Ok(())
 }
 
 // ── sync ───────────────────────────────────────────────────────────────
@@ -786,10 +1001,11 @@ if [ -n "$ZSH_VERSION" ]; then
             's:Fuzzy-switch to a worktree'
             'sync:Sync symlinks, env files, and deps'
             'status:Show rich status of all worktrees'
-            'done:Remove a worktree'
+            'done:Remove a worktree (kills allocated-port processes, compose down, optional DB drop)'
+            'reap:Kill processes bound to ports workz allocated'
             'clean:Prune orphaned worktrees'
             'conflicts:Show files modified in multiple worktrees'
-            'doctor:Diagnose broken symlinks, orphaned ports, stale config'
+            'doctor:Diagnose broken symlinks, orphaned ports, stale locks, config'
             'hook:Print/install the worktree-hook recipe for a host'
             'init:Set up workz for this project'
             'mcp:Start the MCP server for AI agents'
@@ -811,6 +1027,22 @@ if [ -n "$ZSH_VERSION" ]; then
                 local -a branches
                 branches=(${(f)"$(_workz_branches)"})
                 compadd -- "${branches[@]}"
+                ;;
+            reap)
+                local -a branches
+                branches=(${(f)"$(_workz_branches)"})
+                _arguments \
+                    '1:branch:->branch' \
+                    '--all[Reap every allocated port]' \
+                    '-y[Skip confirmation]' \
+                    '--yes[Skip confirmation]' \
+                    '--dry-run[Show what would be killed]' \
+                    '-f[SIGKILL directly]' \
+                    '--force[SIGKILL directly]' \
+                    '--json[Machine output]'
+                if [[ ${state} == branch ]]; then
+                    compadd -- "${branches[@]}"
+                fi
                 ;;
             start)
                 _arguments \
@@ -842,17 +1074,20 @@ else
         prev="${COMP_WORDS[COMP_CWORD-1]}"
 
         if [[ ${COMP_CWORD} -eq 1 ]]; then
-            COMPREPLY=($(compgen -W "start list ls switch s sync status done clean conflicts doctor hook init mcp shell-init" -- "$cur"))
-            return
-        fi
+        COMPREPLY=($(compgen -W "start list ls switch s sync status done reap clean conflicts doctor hook init mcp shell-init" -- "$cur"))
+                return
+            fi
 
-        case "${COMP_WORDS[1]}" in
-            switch|s)
-                COMPREPLY=($(compgen -W "$(_workz_branches)" -- "$cur"))
-                ;;
-            done)
-                COMPREPLY=($(compgen -W "$(_workz_branches)" -- "$cur"))
-                ;;
+            case "${COMP_WORDS[1]}" in
+                switch|s)
+                    COMPREPLY=($(compgen -W "$(_workz_branches)" -- "$cur"))
+                    ;;
+                done)
+                    COMPREPLY=($(compgen -W "$(_workz_branches) --no-reap --no-compose-down --compose-volumes --cleanup-db --force --delete-branch" -- "$cur"))
+                    ;;
+                reap)
+                    COMPREPLY=($(compgen -W "$(_workz_branches) --all --yes --dry-run --force --json" -- "$cur"))
+                    ;;
             start)
                 COMPREPLY=($(compgen -W "--base --no-sync --ai --ai-tool --docker --isolated --create-db --from-db" -- "$cur"))
                 if [[ "$prev" == "--ai-tool" ]]; then
@@ -893,17 +1128,18 @@ end
 
 # Tab completions
 complete -c workz -e
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a start -d "Create a new worktree"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a list -d "List all worktrees"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a switch -d "Fuzzy-switch to a worktree"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a sync -d "Sync symlinks, env files, and deps"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a status -d "Show rich status of all worktrees"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a done -d "Remove a worktree"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a clean -d "Prune orphaned worktrees"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a conflicts -d "Show files modified in multiple worktrees"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a doctor -d "Diagnose broken symlinks, orphaned ports, stale config"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a hook -d "Print/install the worktree-hook recipe for a host"
-complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done clean conflicts doctor hook mcp shell-init init" -a init -d "Set up workz for this project"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a start -d "Create a new worktree"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a list -d "List all worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a switch -d "Fuzzy-switch to a worktree"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a sync -d "Sync symlinks, env files, and deps"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a status -d "Show rich status of all worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a done -d "Remove a worktree (kills allocated-port processes, compose down, optional DB drop)"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a reap -d "Kill processes bound to ports workz allocated"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a clean -d "Prune orphaned worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a conflicts -d "Show files modified in multiple worktrees"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a doctor -d "Diagnose broken symlinks, orphaned ports, stale locks, config"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a hook -d "Print/install the worktree-hook recipe for a host"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a init -d "Set up workz for this project"
 complete -c workz -n "__fish_seen_subcommand_from init" -s y -d "Run non-interactively with detected defaults"
 complete -c workz -n "__fish_seen_subcommand_from hook" -a "claude cursor codex conductor worktrunk generic"
 complete -c workz -n "__fish_seen_subcommand_from hook" -l install -d "Write the config file (never overwrites)"
@@ -921,6 +1157,14 @@ complete -c workz -n "__fish_seen_subcommand_from start" -l isolated -d "Auto-as
 complete -c workz -n "__fish_seen_subcommand_from start" -l create-db -d "Create the Postgres database (with --isolated)"
 complete -c workz -n "__fish_seen_subcommand_from start" -l from-db -d "Clone the created database from this template"
 complete -c workz -n "__fish_seen_subcommand_from done" -l cleanup-db -d "Drop the database created by --isolated"
+complete -c workz -n "__fish_seen_subcommand_from done" -l no-reap -d "Skip killing processes bound to allocated ports"
+complete -c workz -n "__fish_seen_subcommand_from done" -l no-compose-down -d "Skip `docker compose down`"
+complete -c workz -n "__fish_seen_subcommand_from done" -l compose-volumes -d "Also drop compose volumes"
+complete -c workz -n "__fish_seen_subcommand_from reap" -l all -d "Reap every port workz has ever allocated"
+complete -c workz -n "__fish_seen_subcommand_from reap" -s y -l yes -d "Skip confirmation prompt"
+complete -c workz -n "__fish_seen_subcommand_from reap" -l dry-run -d "Show what would be killed, no signal sent"
+complete -c workz -n "__fish_seen_subcommand_from reap" -s f -l force -d "SIGKILL directly"
+complete -c workz -n "__fish_seen_subcommand_from reap" -l json -d "Emit JSON"
 complete -c workz -n "__fish_seen_subcommand_from clean" -l merged -d "Remove worktrees with merged branches"
 complete -c workz -n "__fish_seen_subcommand_from clean" -l base -d "Base branch to check merged against"
 complete -c workz -n "__fish_seen_subcommand_from shell-init init" -a "zsh bash fish"

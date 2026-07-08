@@ -3,7 +3,49 @@
 All notable changes to workz are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [0.11.0] — unreleased ("The Wizard")
+## [0.12.0] ("The Teardown")
+
+worktrees managed by workz are now navigable *and* removable — `workz reap`
+plus the extended `workz done` and `workz doctor` give you a complete,
+reliable teardown story that no other worktree tool ships.
+
+### Added
+
+- **`workz reap [branch]` — kill processes bound to ports workz allocated.**
+  Uses the stateful port registry to know *exactly* which ports a worktree
+  owns, so it never touches a process on a port workz doesn't track
+  (the false-positive risk worktrunk cited when refusing the equivalent —
+  issue #3365). Flags: `--all` (global cleanup of every allocation), `--yes`
+  (skip the kill confirmation, for hooks), `--dry-run` (list what would be
+  killed, no signal sent), `--force` (SIGKILL directly), `--json` (machine
+  output). Backed by `lsof` — doctor now reports on lsof availability and
+  degrades gracefully if it's missing.
+- **`workz done` is now a one-flag teardown.** It always kills the
+  worktree's allocated-port processes (skippable with `--no-reap`), then
+  runs `docker compose down` (skippable with `--no-compose-down`, with
+  `--compose-volumes` to also drop volumes), then drops the optional DB
+  (`--cleanup-db`), then removes the worktree. One command = ports released
+  + DB dropped + compose down + processes dead.
+- **`workz doctor` flags two more failure modes.**
+  - **Stale `.git/index.lock`** — left behind by crashed git processes or
+    `rm -f`-happy agents. Anything older than 60s is reported; `--fix`
+    removes it (after a sanity check that another git isn't actively using
+    it). Detected across every worktree, not just the current one.
+  - **Live processes on orphaned port ranges** — a worktree was deleted but
+    its dev server is still listening. `--fix` reaps them, which is
+    (deliberately) the same code path `workz reap` uses.
+- **`workz doctor` now reports on `lsof` availability** so users know
+  whether the reap path is actually armed.
+
+### Changed
+
+- **Default `workz done` is now destructive on the worktree's running
+  processes.** Previously, `done` removed the worktree directory but left
+  any dev server bound to the allocated port dangling (the process would
+  keep running and the port would stay held until restart). Now reap runs
+  first. If you actually want the old behavior, pass `--no-reap`.
+
+## [0.11.0] ("The Wizard")
 
 ### Added
 - **`--create-db` / `--from-db`** on `workz start` and `workz sync`. With `--isolated`,

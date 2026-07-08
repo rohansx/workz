@@ -298,6 +298,31 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
 
         "workz_doctor" => crate::doctor::report(),
 
+        "workz_reap" => {
+            let all = args["all"].as_bool().unwrap_or(false);
+            let force = args["force"].as_bool().unwrap_or(false);
+            let branch = args["branch"].as_str();
+
+            let report = if all {
+                isolation::reap_all(force)?
+            } else if let Some(b) = branch {
+                isolation::reap_branch(b, force)?
+            } else {
+                // Default: current worktree's branch.
+                let cwd = std::env::current_dir()?;
+                let root = git::repo_root()?;
+                if cwd == root {
+                    anyhow::bail!(
+                        "you're in the main worktree — pass a branch name or all:true"
+                    );
+                }
+                let b = git::current_branch(&cwd)?;
+                isolation::reap_branch(&b, force)?
+            };
+
+            Ok(serde_json::to_string_pretty(&report)?)
+        }
+
         "workz_conflicts" => {
             let conflicts = git::find_conflicts()?;
             if conflicts.is_empty() {
@@ -372,8 +397,20 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "workz_doctor",
-            "description": "Diagnose a broken worktree environment: dangling symlinks, orphaned port allocations, stale worktree refs, and unparseable config. Read-only (does not apply fixes).",
+            "description": "Diagnose a broken worktree environment: dangling symlinks, orphaned port allocations, stale worktree refs, stale .git/index.lock files, live processes on orphaned ports, and unparseable config. Read-only (does not apply fixes).",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "workz_reap",
+            "description": "Kill processes bound to ports workz allocated to a worktree. Uses the stateful port registry, so it only touches ports workz actually owns (no false-positive kills). Pass `all:true` to reap every allocation, or a `branch` to target one. Pass `force:true` to SIGKILL directly. Returns a JSON object (ports_checked, killed, already_free, errors, escalated).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "branch": { "type": "string", "description": "Branch whose allocated ports to reap (defaults to the current worktree's branch)" },
+                    "all":    { "type": "boolean", "description": "Reap every port workz has ever allocated (global cleanup)" },
+                    "force":  { "type": "boolean", "description": "Skip SIGTERM, send SIGKILL immediately" }
+                }
+            }
         }
     ])
 }

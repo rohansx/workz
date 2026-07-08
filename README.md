@@ -76,10 +76,11 @@ workz hook claude               # prints the Claude Code hook to paste
 | `workz` / `workz status` | Every worktree at a glance: branch, dirty state, size, port range |
 | `workz switch [query]` | Fuzzy-jump between worktrees |
 | `workz list` | List worktrees (`ls`) |
-| `workz done [branch]` | Remove a worktree (`--force`, `--delete-branch`, `--cleanup-db`) |
+| `workz done [branch]` | Remove a worktree — auto-reaps allocated-port processes, compose down, optional DB drop (`--force`, `--delete-branch`, `--cleanup-db`, `--no-reap`, `--no-compose-down`, `--compose-volumes`) |
+| `workz reap [branch]` | Kill processes bound to ports workz allocated (`--all`, `--yes`, `--dry-run`, `--force`, `--json`) |
 | `workz clean` | Prune stale worktrees (`--merged` removes merged branches) |
 | `workz conflicts` | Files modified in more than one worktree — catch clashes before merge |
-| `workz doctor` | Diagnose broken symlinks, orphaned ports, stale config (`--fix` repairs) |
+| `workz doctor` | Diagnose broken symlinks, orphaned ports, stale `.git/index.lock` files, live processes on orphaned ports, stale config (`--fix` repairs) |
 | `workz hook <host>` | Print/install the worktree-hook recipe for a host |
 | `workz mcp` | Run the MCP server (below) |
 | `workz shell-init <shell>` | Shell integration for zsh/bash/fish |
@@ -109,6 +110,7 @@ COMPOSE_PROJECT_NAME=feat_api
 - If your `.env.local` already has a `DATABASE_URL`, workz keeps its driver/host/port/credentials and only swaps the database name.
 - Add `--create-db` to actually create the Postgres database (`createdb`), or `--create-db --from-db dev` to clone it from a template. `workz done --cleanup-db` drops it.
 - Port ranges are tracked in `~/.config/workz/ports.json` and released on `workz done`. `workz doctor --fix` reclaims orphans.
+- Dev servers left bound to allocated ports are reaped automatically — by `workz done` (skip with `--no-reap`), by `workz reap [branch]` (with `--all` for global cleanup, `--dry-run` to preview), and by `workz doctor --fix` when the worktree is already gone. Backed by `lsof`; the registry makes it precise — only ports workz owns are ever touched.
 
 ## What gets synced
 
@@ -166,7 +168,7 @@ An MCP server so agents can manage — and provision — worktrees themselves:
 claude mcp add workz -- workz mcp
 ```
 
-Tools: `workz_start`, `workz_sync` (deps + env + isolation, returns JSON), `workz_list`, `workz_status`, `workz_done`, `workz_conflicts`.
+Tools: `workz_start`, `workz_sync` (deps + env + isolation, returns JSON), `workz_list`, `workz_status`, `workz_done`, `workz_conflicts`, `workz_doctor`, `workz_reap` (kill processes on allocated ports).
 
 ## Shell setup
 

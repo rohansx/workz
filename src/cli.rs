@@ -79,6 +79,18 @@ pub enum Commands {
         /// Drop the database created by --isolated
         #[arg(long)]
         cleanup_db: bool,
+
+        /// Skip killing processes bound to the worktree's allocated ports
+        #[arg(long)]
+        no_reap: bool,
+
+        /// Skip `docker compose down` even if a compose file is present
+        #[arg(long)]
+        no_compose_down: bool,
+
+        /// Also drop compose volumes (`docker compose down -v`)
+        #[arg(long)]
+        compose_volumes: bool,
     },
 
     /// Sync symlinks, env files, and deps into a worktree (the hook other tools call)
@@ -123,6 +135,32 @@ pub enum Commands {
         /// Base branch to check merged status against (defaults to main or master)
         #[arg(long)]
         base: Option<String>,
+    },
+
+    /// Kill processes bound to ports workz allocated to a worktree
+    Reap {
+        /// Branch to reap (defaults to the current worktree's branch)
+        branch: Option<String>,
+
+        /// Reap every port workz has ever allocated (global cleanup)
+        #[arg(long)]
+        all: bool,
+
+        /// Skip confirmation prompt (for hooks / scripts)
+        #[arg(short = 'y', long)]
+        yes: bool,
+
+        /// Show what would be killed without actually killing anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Skip SIGTERM, send SIGKILL immediately
+        #[arg(short, long)]
+        force: bool,
+
+        /// Emit a JSON object describing what was killed
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show files modified in more than one worktree (conflicts before merge)
