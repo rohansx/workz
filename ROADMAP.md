@@ -18,16 +18,17 @@ environment engine (`workz sync` + `--isolated`) that all of those tools punt on
 
 The "Teardown" (v0.12) → "Warm deps" (v0.13) → "Services" (v0.14) plan in
 [`launch/worktrunk-gap-plan.md`](launch/worktrunk-gap-plan.md) is the post-relaunch
-direction. Each release owns a defensible layer that no other worktree tool ships:
+direction. **All three releases shipped.**
 
-- **v0.12 "Teardown"** — guaranteed teardown you can trust (`workz reap` +
-  extended `done` + extended `doctor`). The stateful port registry makes safe
-  cleanup possible where stateless tools can't do it.
-- **v0.13 "Warm deps"** — CoW reflink sync strategy (`cp --reflink=auto` on
-  btrfs/XFS, `clonefile` on APFS). Kills three pains: Vite/pnpm symlink
-  breakage, agents mutating deps and poisoning the main tree, and multi-minute
-  installs.
-- **v0.14 "Services"** — named service ports (PORT_WEB/PORT_API per worktree,
-  the monorepo answer worktrunk users hand-salt `hash_port` for), a docker-run
-  Postgres fallback for `--create-db`, `--carry-from` (snapshot uncommitted
-  changes read-only via `git stash create`), and `workz env diff` for secrets drift.
+- **v0.12 "Teardown"** — ✅ shipped. `workz reap`, auto-reap on `done`,
+  extended `doctor` (stale `.git/index.lock` + live processes on orphaned
+  ports). Stateful registry makes safe cleanup possible.
+- **v0.13 "Warm deps"** — ✅ shipped. `clone` strategy with CoW reflink,
+  auto-detected by `workz init`, fallback to full copy on FS without
+  reflink support.
+- **v0.14 "Services"** — ✅ shipped. Named service ports, docker postgres
+  fallback, `--carry-from`, `workz env-diff`.
+
+Next post-relaunch: distribution (cla-squad #260 reply, worktrunk docs PR,
+Show HN draft, runpane coverage fix). See the plan in
+[`launch/worktrunk-gap-plan.md`](launch/worktrunk-gap-plan.md) § Distribution.
