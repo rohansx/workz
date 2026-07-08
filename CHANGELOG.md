@@ -3,6 +3,46 @@
 All notable changes to workz are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] ("Warm Deps")
+
+The dep-sync story for any project whose `node_modules` is large enough that
+"reinstall in every worktree" or "symlink and pray" is the actual cost. A new
+`clone` strategy reflinks the dep directory into each worktree, so it behaves
+like a full copy (isolated, agent-mutation-safe) but takes milliseconds and
+shares storage with the main tree until first write.
+
+### Added
+
+- **New sync strategy: `clone` (CoW reflink).** In `.workz.toml`:
+  ```toml
+  [sync.overrides]
+  node_modules = "clone"
+  ```
+  Auto-selects the right tool per platform (`cp --reflink=auto` on Linux,
+  `cp -c` on macOS). On filesystems that don't support reflink (some btrfs
+  setups disable it at the FS level, plain tmpfs, etc.) it falls back to a
+  full `copy` and emits a warning — the user can then switch to `copy` or
+  `symlink` to silence it.
+- **`workz init` detects reflink support** and recommends `clone` when it's
+  available. The probe (`probe_reflink_support`) writes a tiny temp file and
+  checks whether the result shares an inode with the source.
+- **`workz doctor` reports reflink support** alongside the other `[info]`
+  lines. Useful for the "is clone actually going to work here?" question.
+- **Overrides now apply to non-default entries.** Writing
+  `cache = "clone"` in `[sync.overrides]` no longer requires also adding
+  `cache` to `symlink_add` — common case for caches you didn't pre-list.
+- **New `cloned` field in the sync report.** The CLI summary now prints
+  `cloned (reflink) node_modules` distinctly from `copied`, the JSON output
+  includes it, and the machine-readable report makes it possible to monitor
+  "did the reflink actually happen or did we fall back?" in CI.
+
+### Changed
+
+- **`workz init`'s Node-detected prompt is now clone-aware.** When the FS
+  supports reflink the default flips to `clone` (with `copy` offered as a
+  secondary fallback if the user declines); when reflink is unsupported it
+  falls back to the original copy/symlink choice.
+
 ## [0.12.0] ("The Teardown")
 
 worktrees managed by workz are now navigable *and* removable — `workz reap`

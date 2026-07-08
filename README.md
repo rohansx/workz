@@ -132,9 +132,15 @@ Symlinked `node_modules` breaks a Vite/Vitest/pnpm setup? Override per directory
 
 ```toml
 [sync.overrides]
-node_modules = "copy"     # copy instead of symlink
+node_modules = "copy"     # full copy instead of symlink (Vite / Vitest / pnpm escape hatch)
+node_modules = "clone"    # CoW reflink (v0.13) — instant isolated copy, shares storage with main until first write
 ".vscode"    = "ignore"   # skip entirely
 ```
+
+`clone` is auto-detected and auto-recommended by `workz init` on filesystems
+that support reflink (btrfs / XFS / APFS). Where the FS doesn't support it,
+`sync` falls back to a full copy and prints a one-line warning so you can
+choose `copy` or `symlink` explicitly.
 
 ## Configuration
 

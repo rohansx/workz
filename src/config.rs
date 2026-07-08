@@ -24,6 +24,13 @@ pub enum Strategy {
     /// Physically copy the directory (escape hatch for tools that break on
     /// symlinked node_modules, e.g. Vite / Vitest / pnpm monorepos).
     Copy,
+    /// Copy-on-write reflink of the directory (v0.13). Auto-selected on
+    /// btrfs/XFS/APFS — gives each worktree its own fully-isolated copy
+    /// of `node_modules` etc. without the multi-minute install cost and
+    /// without sharing writes with the main tree (the agent-mutation
+    /// poisoning problem). Falls back to a full `Copy` with a warning on
+    /// filesystems that don't support reflink.
+    Clone,
     /// Never touch this entry.
     Ignore,
 }
@@ -66,6 +73,9 @@ pub struct SyncPlan {
     pub symlink_dirs: Vec<String>,
     /// Directories to recursively copy (override = `copy`).
     pub copy_dirs: Vec<String>,
+    /// Directories to CoW reflink (override = `clone`, v0.13). On filesystems
+    /// without reflink support these silently fall back to a full copy.
+    pub clone_dirs: Vec<String>,
     /// File globs to copy.
     pub copy_globs: Vec<String>,
     /// Entries to skip (used for glob-level filtering during copy).
@@ -97,14 +107,31 @@ impl SyncConfig {
         // Split the symlink candidates by override strategy.
         let mut symlink_dirs = Vec::new();
         let mut copy_dirs = Vec::new();
+        let mut clone_dirs = Vec::new();
         for dir in base_symlink.iter().chain(self.symlink_add.iter()) {
             if is_ignored(dir) {
                 continue;
             }
             match self.overrides.get(dir) {
                 Some(Strategy::Copy) => copy_dirs.push(dir.clone()),
+                Some(Strategy::Clone) => clone_dirs.push(dir.clone()),
                 Some(Strategy::Ignore) => {} // already in ignore
                 _ => symlink_dirs.push(dir.clone()),
+            }
+        }
+
+        // Also honor overrides for entries NOT in the symlink list — lets users
+        // turn an arbitrary directory into a clone/copy without first adding
+        // it to `symlink_add`. Common case: `[sync.overrides] cache = "clone"`
+        // for a project whose defaults don't list `cache`.
+        for (dir, strat) in &self.overrides {
+            if base_symlink.contains(dir) || self.symlink_add.contains(dir) || is_ignored(dir) {
+                continue;
+            }
+            match strat {
+                Strategy::Copy => copy_dirs.push(dir.clone()),
+                Strategy::Clone => clone_dirs.push(dir.clone()),
+                Strategy::Ignore | Strategy::Symlink => {} // symlink is the default; ignore already handled
             }
         }
 
@@ -117,10 +144,11 @@ impl SyncConfig {
 
         dedup(&mut symlink_dirs);
         dedup(&mut copy_dirs);
+        dedup(&mut clone_dirs);
         let mut copy_globs = copy_globs;
         dedup(&mut copy_globs);
 
-        SyncPlan { symlink_dirs, copy_dirs, copy_globs, ignore }
+        SyncPlan { symlink_dirs, copy_dirs, clone_dirs, copy_globs, ignore }
     }
 }
 
@@ -357,6 +385,15 @@ mod tests {
         assert!(!plan.symlink_dirs.contains(&"target".to_string()));
         assert!(!plan.copy_dirs.contains(&"target".to_string()));
         assert!(plan.ignore.contains(&"target".to_string()));
+    }
+
+    #[test]
+    fn override_clone_routes_to_clone_dirs() {
+        let cfg = sync_from("[sync.overrides]\nnode_modules = \"clone\"\n");
+        let plan = cfg.resolve();
+        assert!(plan.clone_dirs.contains(&"node_modules".to_string()));
+        assert!(!plan.symlink_dirs.contains(&"node_modules".to_string()));
+        assert!(!plan.copy_dirs.contains(&"node_modules".to_string()));
     }
 
     #[test]

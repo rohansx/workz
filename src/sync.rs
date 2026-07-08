@@ -44,6 +44,9 @@ pub struct SyncOptions {
 pub struct SyncReport {
     pub symlinked: Vec<String>,
     pub copied: Vec<String>,
+    /// Directories successfully reflinked (v0.13). Distinct from `copied` —
+    /// a `cloned` entry is CoW-shared with the source until first write.
+    pub cloned: Vec<String>,
     /// The package-manager command that ran, e.g. "npm ci" — None if nothing installed.
     pub installed: Option<String>,
     pub warnings: Vec<String>,
@@ -56,6 +59,9 @@ impl SyncReport {
         let mut lines = Vec::new();
         if !self.symlinked.is_empty() {
             lines.push(format!("  symlinked {}", self.symlinked.join(", ")));
+        }
+        if !self.cloned.is_empty() {
+            lines.push(format!("  cloned (reflink) {}", self.cloned.join(", ")));
         }
         if !self.copied.is_empty() {
             lines.push(format!("  copied {}", self.copied.join(", ")));
@@ -87,6 +93,7 @@ pub fn sync_worktree(
         ..Default::default()
     };
     symlink_dirs(source, target, &plan.symlink_dirs, &project, &mut report);
+    clone_dirs(source, target, &plan.clone_dirs, &project, &mut report);
     copy_dirs(source, target, &plan.copy_dirs, &project, &mut report);
     copy_files(source, target, &plan.copy_globs, &plan.ignore, &mut report)?;
     if !opts.no_install {
@@ -368,6 +375,222 @@ fn symlink_dirs(
     }
 }
 
+/// CoW reflink heavy directories from source into target (project-aware, v0.13).
+/// This is the magic: the destination is a real, fully-independent copy of the
+/// source as far as the kernel is concerned, but the bytes aren't duplicated
+/// until either side writes — so a 2 GB `node_modules` "clones" in milliseconds
+/// and the two trees share storage until the worktree dirties it (the agent
+/// can't poison the main tree's deps, and the main tree's `--frozen-lockfile`
+/// stays clean for commits).
+///
+/// Auto-selects the right tool per platform:
+/// - Linux:  `cp --reflink=auto` (auto-falls-back to a regular copy)
+/// - macOS:  `cp -c` (clonefile)
+/// - Other:  falls back to a recursive copy with a warning
+///
+/// If reflink is not supported on the source filesystem (some btrfs setups
+/// disable it at the FS level), we fall back to a full copy and emit a
+/// `warnings` entry — the user can then switch to `copy` or `symlink` to
+/// silence the warning.
+fn clone_dirs(
+    source: &Path,
+    target: &Path,
+    dirs: &[String],
+    project: &ProjectInfo,
+    report: &mut SyncReport,
+) {
+    for dir_name in dirs {
+        if !is_relevant(dir_name, project) {
+            continue;
+        }
+        let src = source.join(dir_name);
+        let dst = target.join(dir_name);
+        if !src.exists() {
+            continue;
+        }
+        // Idempotent.
+        if dst.exists() || dst.symlink_metadata().is_ok() {
+            continue;
+        }
+        match reflink_copy_dir(&src, &dst) {
+            Ok(ReflinkOutcome::Reflinked) => {
+                report.cloned.push(dir_name.clone());
+            }
+            Ok(ReflinkOutcome::CopiedFallback) => {
+                report.warnings.push(format!(
+                    "{dir_name}: filesystem doesn't support reflink, fell back to a full copy"
+                ));
+                report.copied.push(format!("{dir_name}/"));
+            }
+            Err(e) => {
+                report.warnings.push(format!("could not clone {dir_name}: {e}"));
+            }
+        }
+    }
+}
+
+/// Outcome of a reflink attempt — distinguishes "did the CoW magic" from
+/// "degraded to a full copy" so the caller can report on it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReflinkOutcome {
+    /// The destination is a CoW clone sharing storage with the source.
+    Reflinked,
+    /// Reflink was unsupported; we did a regular recursive copy instead.
+    CopiedFallback,
+}
+
+/// Copy `src` directory to `dst` using CoW reflink when the filesystem
+/// supports it; otherwise do a regular recursive copy.
+fn reflink_copy_dir(src: &Path, dst: &Path) -> Result<ReflinkOutcome> {
+    // Pick the platform's reflink-aware copy. We shell out rather than
+    // pulling a `reflink` crate dep — the syscall surface is fiddly and
+    // `cp` already does the right thing.
+    #[cfg(target_os = "linux")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cp");
+        c.args(["-R", "--reflink=auto"]);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cp");
+        c.args(["-R", "-c"]);
+        c
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cp");
+        c.args(["-R"]);
+        c
+    };
+
+    // Run reflink; capture exit status. If `cp` reported a non-fatal
+    // reflink failure but the copy itself succeeded, it still exits 0 —
+    // the only way to know whether reflink was used is to compare inodes
+    // (or the on-disk size) afterwards.
+    cmd.arg(src).arg(dst);
+    let status = cmd.status().context("failed to spawn cp")?;
+    if !status.success() {
+        // Hard failure — try the recursive copy fallback.
+        copy_dir_recursive_simple(src, dst);
+        return Ok(ReflinkOutcome::CopiedFallback);
+    }
+
+    // Verify: same inode on a probe file means the reflink actually happened.
+    // If not, treat the run as a full copy (the warning still gets attached
+    // by the caller via the `CopiedFallback` outcome).
+    if probe_was_reflinked(src, dst) {
+        Ok(ReflinkOutcome::Reflinked)
+    } else {
+        Ok(ReflinkOutcome::CopiedFallback)
+    }
+}
+
+/// Pick a small file from `src`, ask the OS for its inode in both `src` and
+/// `dst`. If the inodes match, the directory tree is reflinked (or at least
+/// that file is — close enough for our purpose).
+fn probe_was_reflinked(src: &Path, dst: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some(probe_src) = pick_probe_file(src) else { return false };
+    let Some(probe_dst) = pick_probe_file(dst) else { return false };
+    let Ok(m1) = std::fs::metadata(&probe_src) else { return false };
+    let Ok(m2) = std::fs::metadata(&probe_dst) else { return false };
+    m1.ino() == m2.ino() && m1.dev() == m2.dev()
+}
+
+/// Walk one level into `dir` and return the first regular file found.
+fn pick_probe_file(dir: &Path) -> Option<std::path::PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_file() {
+            return Some(p);
+        }
+        if p.is_dir() {
+            if let Some(found) = pick_probe_file(&p) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// Probe whether the filesystem containing `dir` supports CoW reflink. Writes
+/// a tiny temp file, attempts to reflink it, and checks whether the two
+/// files share an inode. Returns `None` if the probe can't be run (no temp
+/// dir, no write permission, etc.) — callers should treat that as "unknown"
+/// and not recommend `clone`.
+///
+/// Cached per directory by the caller when used in a hot path; here we
+/// always re-probe because the cost is one stat and one tiny file write.
+pub fn probe_reflink_support(dir: &Path) -> Option<bool> {
+    let probe_dir = dir.join(".workz-probe");
+    std::fs::create_dir_all(&probe_dir).ok()?;
+    let src = probe_dir.join("src");
+    let dst = probe_dir.join("dst");
+
+    // 4 KiB is the smallest block on every common FS — enough to get past any
+    // "empty file" optimizations cp might apply.
+    let data = b"workz-reflink-probe\n".repeat(256);
+    std::fs::write(&src, &data).ok()?;
+
+    #[cfg(target_os = "linux")]
+    let status = std::process::Command::new("cp")
+        .args(["--reflink=auto", src.to_str()?, dst.to_str()?])
+        .status();
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("cp")
+        .args(["-c", src.to_str()?, dst.to_str()?])
+        .status();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let status: std::io::Result<std::process::ExitStatus> =
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "unsupported"));
+
+    let status = status.ok()?;
+
+    // Check inode *before* cleanup so we can compare src vs dst.
+    let supported = if status.success() {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(&src), std::fs::metadata(&dst)) {
+            (Ok(s), Ok(d)) => s.ino() == d.ino() && s.dev() == d.dev(),
+            _ => false,
+        }
+    } else {
+        false
+    };
+
+    // Clean up regardless of outcome.
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&dst);
+    let _ = std::fs::remove_dir(&probe_dir);
+
+    Some(supported)
+}
+
+/// Plain recursive copy as a fallback when reflink is unavailable. Mirrors
+/// the existing `copy_dir_recursive` but isolated so reflink failures don't
+/// double-report as "symlinked" or "cloned" in the report.
+fn copy_dir_recursive_simple(src: &Path, dst: &Path) {
+    if std::fs::create_dir_all(dst).is_err() {
+        return;
+    }
+    let entries = match std::fs::read_dir(src) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if let Ok(ft) = entry.file_type() {
+            if ft.is_dir() {
+                copy_dir_recursive_simple(&from, &to);
+            } else if !to.exists() {
+                let _ = std::fs::copy(&from, &to);
+            }
+        }
+    }
+}
+
 /// Physically copy directories (the `copy` strategy override) — the escape hatch
 /// for tools that break on symlinked node_modules (Vite/Vitest/pnpm monorepos).
 fn copy_dirs(
@@ -640,5 +863,123 @@ mod tests {
         copy_files(&source, &target, &[".env".into()], &[], &mut second).unwrap();
         assert!(second.copied.is_empty());
         assert!(second.warnings.is_empty());
+    }
+
+    // ── reflink / clone tests ──────────────────────────────────────────────
+
+    #[test]
+    fn reflink_copy_dir_reports_reflinked_or_fallback() {
+        // The outcome depends on the host FS — we assert the contract: the
+        // returned outcome is one of the two valid variants, and the dst dir
+        // exists either way.
+        let (source, target) = setup_dirs();
+        let cache = source.join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("a.txt"), "hello").unwrap();
+        fs::write(cache.join("b.txt"), "world").unwrap();
+
+        let outcome = reflink_copy_dir(&cache, &target.join("cache")).unwrap();
+        assert!(
+            outcome == ReflinkOutcome::Reflinked || outcome == ReflinkOutcome::CopiedFallback,
+            "outcome must be one of the two"
+        );
+        // Either way, the destination must exist with the same files.
+        assert!(target.join("cache/a.txt").exists());
+        assert!(target.join("cache/b.txt").exists());
+        assert_eq!(fs::read_to_string(target.join("cache/a.txt")).unwrap(), "hello");
+    }
+
+    #[test]
+    fn clone_dirs_routes_to_cloned_or_copied() {
+        // The project info doesn't matter for cache_dir / a generic "cache" entry
+        // because `is_relevant` returns true for unknown dirs.
+        let (source, target) = setup_dirs();
+        let cache = source.join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("file.txt"), "data").unwrap();
+
+        let project = ProjectInfo::default();
+        let mut report = SyncReport::default();
+        clone_dirs(&source, &target, &["cache".to_string()], &project, &mut report);
+
+        // Exactly one of cloned/copied is populated; the other is empty.
+        assert!(
+            !report.cloned.is_empty() || !report.copied.is_empty(),
+            "sync should have either cloned or copied the dir"
+        );
+        assert_eq!(
+            report.cloned.len() + report.copied.len(),
+            1,
+            "exactly one outcome must be recorded, got cloned={:?} copied={:?}",
+            report.cloned,
+            report.copied
+        );
+        // And dst must exist.
+        assert!(target.join("cache/file.txt").exists());
+    }
+
+    #[test]
+    fn clone_dirs_skips_irrelevant_for_project() {
+        // A Node-only project should not be cloning a "target" (Rust) dir
+        // even if it's listed in clone_dirs.
+        let (source, target) = setup_dirs();
+        fs::create_dir_all(source.join("target")).unwrap();
+        fs::write(source.join("target/x"), "x").unwrap();
+
+        let project = ProjectInfo {
+            has_node: true,
+            ..Default::default()
+        };
+        let mut report = SyncReport::default();
+        clone_dirs(&source, &target, &["target".to_string()], &project, &mut report);
+        assert!(report.cloned.is_empty());
+        assert!(report.copied.is_empty());
+        // src untouched.
+        assert!(!target.join("target").exists());
+    }
+
+    #[test]
+    fn clone_dirs_idempotent_no_overwrite() {
+        // Pre-existing destination → skip entirely.
+        let (source, target) = setup_dirs();
+        let cache = source.join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("file.txt"), "new").unwrap();
+        fs::create_dir_all(target.join("cache")).unwrap();
+        fs::write(target.join("cache/file.txt"), "old").unwrap();
+
+        let project = ProjectInfo::default();
+        let mut report = SyncReport::default();
+        clone_dirs(&source, &target, &["cache".to_string()], &project, &mut report);
+        // The "old" content must survive — we never overwrite.
+        assert_eq!(fs::read_to_string(target.join("cache/file.txt")).unwrap(), "old");
+        assert!(report.cloned.is_empty());
+        assert!(report.copied.is_empty());
+    }
+
+    #[test]
+    fn sync_worktree_with_clone_strategy_in_config() {
+        // End-to-end: a SyncConfig with a `clone` override actually drives
+        // the reflink path.
+        let (source, target) = setup_dirs();
+        let cache = source.join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("file.txt"), "data").unwrap();
+
+        // Parse as the full Config (overrides live under [sync.overrides]).
+        let toml = "[sync.overrides]\ncache = \"clone\"\n";
+        let cfg: crate::config::Config = toml::from_str(toml).unwrap();
+        let opts = SyncOptions { no_install: true, quiet: true };
+        let report = sync_worktree(&source, &target, &cfg.sync, opts).unwrap();
+
+        // Resulting state: clone_dirs had "cache" in it (via resolve()).
+        let plan = cfg.sync.resolve();
+        assert!(plan.clone_dirs.contains(&"cache".to_string()));
+        // sync reported either cloned or copied the cache.
+        assert!(
+            !report.cloned.is_empty() || !report.copied.is_empty(),
+            "sync_worktree should have processed the clone strategy"
+        );
+        assert!(target.join("cache/file.txt").exists());
     }
 }

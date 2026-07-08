@@ -53,6 +53,7 @@ fn diagnose(fix: bool) -> Result<(Vec<String>, bool)> {
     problems += check_config(&root, &mut out);
     problems += check_orphaned_ports(fix, &mut out);
     problems += check_worktrees(&root, fix, &mut out);
+    check_reflink_support(&root, &mut out);
     check_tooling(&mut out);
 
     out.push(String::new());
@@ -212,6 +213,28 @@ fn find_git_dirs() -> Result<Vec<PathBuf>> {
 }
 
 // ── ports ────────────────────────────────────────────────────────────────────
+
+/// Report whether the filesystem holding the project root supports CoW
+/// reflink — the v0.13 prerequisite for using the `clone` strategy. When
+/// supported, this is the answer to "why is my dev server still fast after I
+/// added a new worktree?"; when not, the `clone` override will silently fall
+/// back to a full copy at sync time.
+fn check_reflink_support(root: &Path, out: &mut Vec<String>) {
+    match crate::sync::probe_reflink_support(root) {
+        Some(true) => out.push(format!(
+            "[ok] reflink (CoW clone) supported on {} — set `node_modules = \"clone\"` for instant isolated deps",
+            root.display()
+        )),
+        Some(false) => out.push(
+            "[info] reflink not supported on this filesystem — `clone` strategy will fall back to a full copy"
+                .to_string(),
+        ),
+        None => out.push(
+            "[info] could not probe reflink support (no write permission?) — `clone` strategy untested"
+                .to_string(),
+        ),
+    }
+}
 
 /// Find live processes still listening on ports whose worktree is gone, and
 /// (with `--fix`) reap them. Distinct from `check_orphaned_ports` which only
