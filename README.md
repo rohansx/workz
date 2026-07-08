@@ -71,15 +71,16 @@ workz hook claude               # prints the Claude Code hook to paste
 | Command | Does |
 |---------|------|
 | `workz init` | Guided setup: detect the stack, write `.workz.toml`, install a hook (`-y` for defaults) |
-| `workz start <branch>` | Create a worktree + sync (`--isolated`, `--create-db`, `--docker`, `--ai`, `--base`) |
+| `workz start <branch>` | Create a worktree + sync (`--isolated`, `--create-db`, `--docker`, `--ai`, `--base`, `--carry-from <branch\|main>`) |
 | `workz sync [path]` | Make a worktree runnable — the hook command (`--isolated`, `--json`, `--quiet`, `--no-install`) |
-| `workz` / `workz status` | Every worktree at a glance: branch, dirty state, size, port range |
+| `workz` / `workz status` | Every worktree at a glance: branch, dirty state, size, port range, service map |
 | `workz switch [query]` | Fuzzy-jump between worktrees |
 | `workz list` | List worktrees (`ls`) |
 | `workz done [branch]` | Remove a worktree — auto-reaps allocated-port processes, compose down, optional DB drop (`--force`, `--delete-branch`, `--cleanup-db`, `--no-reap`, `--no-compose-down`, `--compose-volumes`) |
 | `workz reap [branch]` | Kill processes bound to ports workz allocated (`--all`, `--yes`, `--dry-run`, `--force`, `--json`) |
 | `workz clean` | Prune stale worktrees (`--merged` removes merged branches) |
 | `workz conflicts` | Files modified in more than one worktree — catch clashes before merge |
+| `workz env-diff` | Show drift between `.env.local` managed blocks across worktrees |
 | `workz doctor` | Diagnose broken symlinks, orphaned ports, stale `.git/index.lock` files, live processes on orphaned ports, stale config (`--fix` repairs) |
 | `workz hook <host>` | Print/install the worktree-hook recipe for a host |
 | `workz mcp` | Run the MCP server (below) |
@@ -108,9 +109,45 @@ COMPOSE_PROJECT_NAME=feat_api
 ```
 
 - If your `.env.local` already has a `DATABASE_URL`, workz keeps its driver/host/port/credentials and only swaps the database name.
-- Add `--create-db` to actually create the Postgres database (`createdb`), or `--create-db --from-db dev` to clone it from a template. `workz done --cleanup-db` drops it.
+- Add `--create-db` to actually create the Postgres database (`createdb`), or `--create-db --from-db dev` to clone it from a template. `workz done --cleanup-db` drops it. If `createdb` isn't on `PATH`, workz falls back to a per-worktree `postgres:16-alpine` docker container named `workz-pg-<slug>`, torn down by `workz done --cleanup-db`.
 - Port ranges are tracked in `~/.config/workz/ports.json` and released on `workz done`. `workz doctor --fix` reclaims orphans.
 - Dev servers left bound to allocated ports are reaped automatically — by `workz done` (skip with `--no-reap`), by `workz reap [branch]` (with `--all` for global cleanup, `--dry-run` to preview), and by `workz doctor --fix` when the worktree is already gone. Backed by `lsof`; the registry makes it precise — only ports workz owns are ever touched.
+
+## Monorepos / named services
+
+A monorepo with multiple services per worktree (web + api + worker) needs
+a port *per service*, not a single port. Configure them in `.workz.toml`:
+
+```toml
+[isolation]
+services = ["web", "api", "worker"]
+```
+
+Each named service gets one port from the range, in the order listed.
+The first doubles as `PORT` for back-compat; the rest are exposed as
+`PORT_<UPPERCASE_NAME>`:
+
+```dotenv
+PORT=3010
+PORT_WEB=3010
+PORT_API=3011
+PORT_WORKER=3012
+```
+
+`workz status` shows the map alongside the range. `workz reap` and
+`workz done` kill every process listening on any of these — same precision
+guarantee as the single-port path.
+
+## Carrying uncommitted work
+
+```bash
+workz start feat/new-ui --carry-from main       # snapshot main's uncommitted
+workz start feat/iter-2 --carry-from feat/ui   # snapshot another worktree's
+```
+
+Snapshots use `git stash create` (read-only) plus a manual untracked-file
+copy — safe to use while an agent is still running in the source. The
+result is identical to having typed it yourself in the new worktree.
 
 ## What gets synced
 

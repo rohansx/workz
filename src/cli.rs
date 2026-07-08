@@ -50,6 +50,14 @@ pub enum Commands {
         /// Clone the created database from this template (implies --create-db)
         #[arg(long, value_name = "DB")]
         from_db: Option<String>,
+
+        /// Snapshot uncommitted changes from <source> and apply them in the
+        /// new worktree. <source> is a branch name (its worktree's uncommitted
+        /// state), or the literal "main" for the main worktree. Safe to use
+        /// while an agent is running in the source — uses `git stash create`
+        /// (read-only) and never mutates the source. (v0.14)
+        #[arg(long, value_name = "SOURCE")]
+        carry_from: Option<String>,
     },
 
     /// List all worktrees with status
@@ -165,6 +173,13 @@ pub enum Commands {
 
     /// Show files modified in more than one worktree (conflicts before merge)
     Conflicts,
+
+    /// Show drift between .env.local managed blocks across worktrees
+    EnvDiff {
+        /// Only show worktrees whose branch matches this query
+        #[arg(long, value_name = "BRANCH")]
+        branch: Option<String>,
+    },
 
     /// Diagnose broken symlinks, orphaned ports, and stale config
     Doctor {

@@ -13,6 +13,7 @@ use clap::Parser;
 use cli::{AiTool, Commands, Shell};
 use skim::prelude::*;
 use std::io::Cursor;
+use std::path::Path;
 use std::process::Command;
 
 /// Sentinel prefix for shell integration — the wrapper function parses this to cd.
@@ -37,6 +38,7 @@ fn main() -> Result<()> {
             isolated,
             create_db,
             from_db,
+            carry_from,
         } => cmd_start(
             &branch,
             base.as_deref(),
@@ -47,6 +49,7 @@ fn main() -> Result<()> {
             isolated,
             create_db,
             from_db.as_deref(),
+            carry_from.as_deref(),
         ),
         Commands::List => cmd_list(),
         Commands::Switch { query } => cmd_switch(query.as_deref()),
@@ -95,6 +98,7 @@ fn main() -> Result<()> {
             json,
         } => cmd_reap(branch.as_deref(), all, yes, dry_run, force, json),
         Commands::Conflicts => cmd_conflicts(),
+        Commands::EnvDiff { branch } => cmd_env_diff(branch.as_deref()),
         Commands::Doctor { fix } => {
             if doctor::run(fix)? {
                 Ok(())
@@ -141,6 +145,7 @@ fn cmd_start(
     isolated: bool,
     create_db: bool,
     from_db: Option<&str>,
+    carry_from: Option<&str>,
 ) -> Result<()> {
     let root = git::repo_root()?;
     let wt_path = git::worktree_path(&root, branch);
@@ -155,6 +160,39 @@ fn cmd_start(
 
     git::worktree_add(&wt_path, branch, base)?;
     println!("  worktree created at {}", wt_path.display());
+
+    // --carry-from: snapshot the source's uncommitted state and apply it here.
+    // Runs *before* sync/isolation so any new files the user brings along get
+    // their normal sync treatment (env files get copied, deps get installed).
+    if let Some(source_label) = carry_from {
+        let source_path = resolve_carry_source(&root, source_label)?;
+        match git::snapshot_uncommitted(&source_path)? {
+            Some(snap) => {
+                let tracked_msg = match &snap.tracked {
+                    Some(h) => format!("tracked={}", &h[..8.min(h.len())]),
+                    None => "no-tracked-changes".to_string(),
+                };
+                println!(
+                    "  carrying uncommitted changes from {} ({} + {} untracked file(s))",
+                    source_label,
+                    tracked_msg,
+                    snap.untracked.len()
+                );
+                match git::apply_carry(&wt_path, &snap) {
+                    Ok(n) if n > 0 => println!("  applied carry-from snapshot ({n} untracked file(s))"),
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("  warning: could not apply carry-from snapshot: {e}");
+                        eprintln!("  (source worktree is unchanged; the snapshot is still in the object store)");
+                    }
+                }
+                if let Some(h) = &snap.tracked {
+                    git::drop_stash(&wt_path, h);
+                }
+            }
+            None => println!("  (source '{}' has nothing to carry)", source_label),
+        }
+    }
 
     let config = config::load_config(&root)?;
 
@@ -188,9 +226,21 @@ fn cmd_start(
             &wt_path,
             config.isolation.port_range_size,
             framework,
+            &config.isolation.services,
         )?;
         println!("  isolated environment:");
-        if iso.port_count > 1 {
+        if !iso.services.is_empty() {
+            // Named service ports (v0.14): each gets PORT_<NAME>=N
+            for (name, port) in &iso.services {
+                println!("    PORT_{}={}", name.to_uppercase(), port);
+            }
+            // The first service doubles as the top-level PORT for compat.
+            if iso.port_count > 1 {
+                println!("    PORT={}..{}            → .env.local", iso.port, iso.port_end);
+            } else {
+                println!("    PORT={}                 → .env.local", iso.port);
+            }
+        } else if iso.port_count > 1 {
             println!("    PORT={}..{}            → .env.local", iso.port, iso.port_end);
         } else {
             println!("    PORT={}                 → .env.local", iso.port);
@@ -289,6 +339,37 @@ fn which_exists(cmd: &str) -> bool {
 }
 
 // ── list ───────────────────────────────────────────────────────────────
+
+/// Resolve a `--carry-from` source label to a worktree path. The label is
+/// either a branch name (we look up the worktree holding it) or the
+/// literal "main" / "master" / "root" / "." for the main worktree.
+fn resolve_carry_source(root: &Path, source: &str) -> Result<std::path::PathBuf> {
+    match source {
+        "main" | "master" | "root" | "." => {
+            // The main worktree is the canonical root.
+            Ok(root.to_path_buf())
+        }
+        _ => {
+            // Look up the worktree holding this branch. We can't use
+            // `git::worktree_path` here because that's the convention
+            // `<root_parent>/<repo>--<branch>` — which is what workz uses
+            // for *its* worktrees, but the source might be a worktree
+            // created some other way.
+            let worktrees = git::worktree_list()?;
+            let found = worktrees
+                .iter()
+                .find(|w| w.branch == source && !w.is_bare)
+                .map(|w| w.path.clone());
+            match found {
+                Some(p) => Ok(p),
+                None => bail!(
+                    "no worktree found for branch '{}' — pass a branch name with an active worktree, or 'main' for the main worktree",
+                    source
+                ),
+            }
+        }
+    }
+}
 
 fn cmd_list() -> Result<()> {
     let worktrees = git::worktree_list()?;
@@ -771,6 +852,7 @@ fn cmd_sync(
             &target,
             config.isolation.port_range_size,
             report.framework,
+            &config.isolation.services,
         )?)
     } else {
         None
@@ -789,14 +871,22 @@ fn cmd_sync(
 
     if json {
         let iso_json = match &iso {
-            Some(i) => serde_json::json!({
-                "port": i.port,
-                "port_end": i.port_end,
-                "port_count": i.port_count,
-                "db_name": i.db_name,
-                "compose_project": i.compose_project,
-                "env_file": ".env.local",
-            }),
+            Some(i) => {
+                let services_obj: serde_json::Map<String, serde_json::Value> = i
+                    .services
+                    .iter()
+                    .map(|(n, p)| (n.clone(), serde_json::json!(p)))
+                    .collect();
+                serde_json::json!({
+                    "port": i.port,
+                    "port_end": i.port_end,
+                    "port_count": i.port_count,
+                    "db_name": i.db_name,
+                    "compose_project": i.compose_project,
+                    "services": services_obj,
+                    "env_file": ".env.local",
+                })
+            }
             None => serde_json::Value::Null,
         };
         let out = serde_json::json!({
@@ -821,9 +911,19 @@ fn cmd_sync(
             } else {
                 i.port.to_string()
             };
+            let services_str = if i.services.is_empty() {
+                String::new()
+            } else {
+                let pairs: Vec<String> = i
+                    .services
+                    .iter()
+                    .map(|(n, p)| format!("PORT_{}={}", n.to_uppercase(), p))
+                    .collect();
+                format!(" [{}]", pairs.join(", "))
+            };
             println!(
-                "  isolated: PORT={} DB_NAME={} COMPOSE_PROJECT_NAME={} → .env.local",
-                range, i.db_name, i.compose_project
+                "  isolated: PORT={}{} DB_NAME={} COMPOSE_PROJECT_NAME={} → .env.local",
+                range, services_str, i.db_name, i.compose_project
             );
         }
     }
@@ -876,14 +976,40 @@ fn cmd_status() -> Result<()> {
             })
             .unwrap_or_default();
 
+        // Named services are shown alongside the range when the .workz.toml
+        // in the main repo configured any. We look it up best-effort — if the
+        // main repo's config can't be loaded we just skip the extra detail.
+        let services_info = match git::repo_root().ok().and_then(|r| config::load_config(&r).ok()) {
+            Some(cfg) if !cfg.isolation.services.is_empty() => {
+                if let Some(alloc) = isolation::get_allocation(&wt.branch) {
+                    let pairs: Vec<String> = cfg
+                        .isolation
+                        .services
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| format!("{}={}", name, alloc.port.saturating_add(i as u16)))
+                        .collect();
+                    if pairs.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  [{}]", pairs.join(", "))
+                    }
+                } else {
+                    String::new()
+                }
+            }
+            _ => String::new(),
+        };
+
         println!(
-            "  {:<width$}  {}{}  {}{}{}{}",
+            "  {:<width$}  {}{}  {}{}{}{}{}",
             wt.branch,
             wt.path.display(),
             dirty,
             size,
             last,
             port_info,
+            services_info,
             docker,
             width = max_branch,
         );
@@ -903,6 +1029,24 @@ fn cmd_conflicts() -> Result<()> {
     println!("files modified in multiple worktrees:");
     for (file, branches) in &conflicts {
         println!("  {}  —  {}", file, branches.join(", "));
+    }
+    Ok(())
+}
+
+// ── env diff ──────────────────────────────────────────────────────────
+
+fn cmd_env_diff(branch_filter: Option<&str>) -> Result<()> {
+    let worktrees = git::worktree_list()?;
+    let envs: Vec<isolation::ManagedEnv> = worktrees
+        .iter()
+        .filter(|w| !w.is_bare)
+        .filter(|w| branch_filter.is_none_or(|b| w.branch == b))
+        .map(|w| isolation::read_managed_env(&w.path, &w.branch))
+        .collect();
+
+    let report = isolation::env_drift_report(&envs);
+    for line in &report {
+        println!("{line}");
     }
     Ok(())
 }

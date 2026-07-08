@@ -3,6 +3,50 @@
 All notable changes to workz are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.14.0] ("Services")
+
+The runtime story for monorepos and per-worktree databases. Named service
+ports, a docker fallback for the database, safe cross-worktree carries of
+uncommitted work, and env-block drift detection.
+
+### Added
+
+- **Named service ports** (`[isolation.services]` in `.workz.toml`):
+  ```toml
+  [isolation]
+  services = ["web", "api", "worker"]
+  ```
+  Each name gets one port from the allocated range, in order. The first
+  named service doubles as the top-level `PORT` for backward compat; the
+  rest get `PORT_<UPPERCASE_NAME>` (e.g. `PORT_API=3011`). The Redis
+  default-port is suppressed when a named service has already claimed
+  that slot. `workz status` shows the service map alongside the range.
+  This is the monorepo answer worktrunk users currently hand-salt
+  `hash_port` for — now declarative.
+
+- **`workz start --carry-from <branch|main>`** — snapshot a source
+  worktree's uncommitted state (tracked + untracked) and apply it in the
+  new worktree. Uses `git stash create` (read-only — never mutates the
+  source) plus a manual untracked-file copy, then drops the temp stash
+  commit. Safe to use while an agent is running in the source worktree.
+  Worktrunk users have been asking for this for months (issues #938 and
+  #3276) — workz ships it.
+
+- **Docker postgres fallback for `--create-db`.** When `createdb` isn't
+  available (the common case on dev machines without a local Postgres
+  install), `--create-db` now spins up a per-worktree
+  `postgres:16-alpine` container named `workz-pg-<slug>` instead of
+  failing. Container is started via `docker` (or `podman` if `docker`
+  isn't installed), bound to `localhost:5432`, and torn down on
+  `workz done --cleanup-db`. The DATABASE_URL derivation in
+  `.env.local` works against it transparently.
+
+- **`workz env-diff`** — show drift between `.env.local` managed blocks
+  across worktrees. For each env var, prints "all aligned" when every
+  worktree has the same value, or a per-worktree breakdown when they
+  disagree. Catches the "is my `.env` even current?" question that's
+  loud in HN commentary and has no tool answer.
+
 ## [0.13.0] ("Warm Deps")
 
 The dep-sync story for any project whose `node_modules` is large enough that

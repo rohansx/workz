@@ -178,6 +178,14 @@ pub struct IsolationConfig {
     /// Base port for first worktree (default: 3000)
     #[serde(default = "default_base_port")]
     pub base_port: u16,
+
+    /// Named services to allocate ports for (v0.14). Each name gets one
+    /// port from the range, in the order listed. The first named service
+    /// is also exposed as `PORT` (backward compat); the rest get
+    /// `PORT_<UPPERCASE_NAME>`. Empty/missing = no named services (the
+    /// single `PORT` + framework-specific vars still apply).
+    #[serde(default)]
+    pub services: Vec<String>,
 }
 
 fn default_port_range_size() -> u16 { 10 }
@@ -188,6 +196,7 @@ impl Default for IsolationConfig {
         Self {
             port_range_size: default_port_range_size(),
             base_port: default_base_port(),
+            services: Vec::new(),
         }
     }
 }
@@ -314,6 +323,7 @@ fn merge_configs(global: Config, project: Config) -> Config {
     let default_iso = IsolationConfig::default();
     let isolation = if project.isolation.port_range_size != default_iso.port_range_size
         || project.isolation.base_port != default_iso.base_port
+        || !project.isolation.services.is_empty()
     {
         project.isolation
     } else {

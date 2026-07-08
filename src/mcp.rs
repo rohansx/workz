@@ -173,6 +173,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
                     &wt_path,
                     config.isolation.port_range_size,
                     framework,
+                    &config.isolation.services,
                 )?;
                 result.push_str(&format!(
                     "\nisolated: PORT={}-{} DB_NAME={} COMPOSE_PROJECT_NAME={}",
@@ -248,20 +249,29 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
                     &path,
                     config.isolation.port_range_size,
                     report.framework,
+                    &config.isolation.services,
                 )?)
             } else {
                 None
             };
 
             let iso_json = match &iso {
-                Some(i) => json!({
-                    "port": i.port,
-                    "port_end": i.port_end,
-                    "port_count": i.port_count,
-                    "db_name": i.db_name,
-                    "compose_project": i.compose_project,
-                    "env_file": ".env.local",
-                }),
+                Some(i) => {
+                    let services_obj: serde_json::Map<String, serde_json::Value> = i
+                        .services
+                        .iter()
+                        .map(|(n, p)| (n.clone(), json!(p)))
+                        .collect();
+                    json!({
+                        "port": i.port,
+                        "port_end": i.port_end,
+                        "port_count": i.port_count,
+                        "db_name": i.db_name,
+                        "compose_project": i.compose_project,
+                        "services": services_obj,
+                        "env_file": ".env.local",
+                    })
+                }
                 None => Value::Null,
             };
 

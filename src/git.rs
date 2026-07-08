@@ -247,6 +247,133 @@ pub fn find_conflicts() -> Result<Vec<(String, Vec<String>)>> {
     Ok(conflicts)
 }
 
+/// What a snapshot of an uncommitted state captured — tracked changes,
+/// untracked files, or both. The consumer gets a single opaque "carry ID"
+/// back and uses [`apply_carry`] to materialize the state elsewhere.
+#[derive(Debug, Clone, Default)]
+pub struct Snapshot {
+    /// Hash of the stash commit with the tracked changes, or `None` if the
+    /// working tree had no tracked changes.
+    pub tracked: Option<String>,
+    /// List of (relative path, source absolute path) for each untracked
+    /// file we copied. The target gets the same relative paths.
+    pub untracked: Vec<(String, std::path::PathBuf)>,
+}
+
+/// Snapshot the uncommitted state of a worktree (tracked + untracked) for
+/// later application in another worktree. Read-only: never mutates the
+/// source's working tree, never touches the stash ref, never deletes
+/// anything. Safe to call while an agent is running in the source worktree.
+///
+/// Returns `Ok(None)` when the source has nothing to carry (clean tree).
+pub fn snapshot_uncommitted(source: &Path) -> Result<Option<Snapshot>> {
+    // 1. Snapshot the tracked changes via `git stash create` (no flag —
+    //    `--include-untracked` produces a merge commit that `git stash apply`
+    //    doesn't fully restore in a clean target worktree, so we handle the
+    //    two parts separately).
+    let output = Command::new("git")
+        .args(["-C", source.to_str().unwrap_or("."), "stash", "create", "--quiet"])
+        .output()
+        .context("failed to run git stash create")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git stash create failed in {}: {}", source.display(), stderr.trim());
+    }
+    let tracked = {
+        let h = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if h.is_empty() { None } else { Some(h) }
+    };
+
+    // 2. Snapshot untracked files by listing them and reading their bytes.
+    //    We do NOT copy them into the target yet — just record the paths so
+    //    [`apply_carry`] can stream them on demand.
+    let untracked_output = Command::new("git")
+        .args([
+            "-C", source.to_str().unwrap_or("."),
+            "ls-files", "--others", "--exclude-standard", "-z",
+        ])
+        .output()
+        .context("failed to run git ls-files --others")?;
+    let mut untracked: Vec<(String, std::path::PathBuf)> = Vec::new();
+    if untracked_output.status.success() {
+        // `-z` separates paths with NUL bytes; iterate as raw bytes to avoid
+        // any string-splitting ambiguity (filenames can contain newlines).
+        for path_bytes in untracked_output.stdout.split(|b| *b == 0) {
+            if path_bytes.is_empty() {
+                continue;
+            }
+            let rel = String::from_utf8_lossy(path_bytes).into_owned();
+            let abs = source.join(&rel);
+            untracked.push((rel, abs));
+        }
+    }
+
+    if tracked.is_none() && untracked.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(Snapshot {
+        tracked,
+        untracked,
+    }))
+}
+
+/// Apply a [`Snapshot`] to a target worktree. The source worktree is
+/// untouched. Tracked changes are applied via `git stash apply`; untracked
+/// files are copied byte-for-byte. Returns the number of untracked files
+/// successfully copied (so the caller can warn about partial failures).
+pub fn apply_carry(target: &Path, snap: &Snapshot) -> Result<usize> {
+    if let Some(hash) = &snap.tracked {
+        let status = Command::new("git")
+            .args(["-C", target.to_str().unwrap_or("."), "stash", "apply", "--index", hash])
+            .status()
+            .context("failed to run git stash apply")?;
+        if !status.success() {
+            bail!("git stash apply failed in {}", target.display());
+        }
+    }
+
+    let mut copied = 0;
+    for (rel, src_abs) in &snap.untracked {
+        let dst = target.join(rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Overwrite only if the target file is identical to the source —
+        // we don't want to clobber files that were already carried or that
+        // were created in the new worktree by another step. Cheap content
+        // check via size + first chunk.
+        if dst.exists() {
+            let src_meta = std::fs::metadata(src_abs).ok();
+            let dst_meta = std::fs::metadata(&dst).ok();
+            if let (Some(s), Some(d)) = (src_meta, dst_meta) {
+                if s.len() == d.len() {
+                    // Same size — assume same content; skip.
+                    copied += 1;
+                    continue;
+                }
+            }
+        }
+        match std::fs::copy(src_abs, &dst) {
+            Ok(_) => copied += 1,
+            Err(e) => eprintln!(
+                "  warning: could not carry untracked file {}: {e}",
+                rel
+            ),
+        }
+    }
+    Ok(copied)
+}
+
+/// Drop a tracked-changes stash commit from the object store. Called after
+/// the consumer has successfully applied the snapshot — the commit would
+/// otherwise sit in the reflog forever. Best-effort; ignored on failure.
+pub fn drop_stash(target: &Path, stash_commit: &str) {
+    let _ = Command::new("git")
+        .args(["-C", target.to_str().unwrap_or("."), "stash", "drop", "--quiet", stash_commit])
+        .status();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

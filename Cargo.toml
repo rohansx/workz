@@ -1,6 +1,6 @@
 [package]
 name = "workz"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 description = "The environment engine for agent worktrees — zero-config dep sync and port/DB/compose isolation"
 license = "MIT OR Apache-2.0"

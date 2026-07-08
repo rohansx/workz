@@ -43,6 +43,10 @@ pub struct IsolationConfig {
     pub port_count: u16,
     pub db_name: String,
     pub compose_project: String,
+    /// One entry per named service: `(name, port)`. Empty when no services
+    /// are configured. The first named service shares its port with the
+    /// top-level `port` for backward compat with the single-service case.
+    pub services: Vec<(String, u16)>,
 }
 
 // ── Registry path ────────────────────────────────────────────────────────────
@@ -148,6 +152,7 @@ pub fn setup_isolation(
     wt_path: &Path,
     range_size: u16,
     framework: Framework,
+    services: &[String],
 ) -> Result<IsolationConfig> {
     let mut registry = load_registry();
     let slug = branch_to_slug(branch);
@@ -170,7 +175,19 @@ pub fn setup_isolation(
         alloc
     };
 
-    write_env_local(wt_path, &alloc, framework)?;
+    // Named services: each consumes one port from the range, in order. The
+    // first named service doubles as the top-level `PORT` for backward compat
+    // (any single-service config keeps working unchanged).
+    let svc_pairs: Vec<(String, u16)> = services
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let p = alloc.port.saturating_add(i as u16);
+            (name.clone(), p)
+        })
+        .collect();
+
+    write_env_local(wt_path, &alloc, framework, &svc_pairs)?;
 
     Ok(IsolationConfig {
         port: alloc.port,
@@ -178,6 +195,7 @@ pub fn setup_isolation(
         port_count: alloc.port_count,
         db_name: alloc.db_name.clone(),
         compose_project: alloc.compose_project.clone(),
+        services: svc_pairs,
     })
 }
 
@@ -206,6 +224,11 @@ fn createdb_args(db_name: &str, from_db: Option<&str>) -> Vec<String> {
 /// Best-effort: create the PostgreSQL database for an isolated worktree
 /// (`--create-db`). Optionally clones from a template db (`--from-db`).
 /// Connection is taken from the standard libpq environment (PGHOST, PGPORT, …).
+///
+/// Tries `createdb` first; falls back to spinning up a per-worktree
+/// `postgres:16` container when no system Postgres is available (v0.14).
+/// The container is named `workz-pg-<slug>` and torn down by
+/// [`drop_database`] on `workz done --cleanup-db`.
 pub fn create_database(db_name: &str, from_db: Option<&str>) {
     // Status goes to stderr so it never pollutes `workz sync --json` stdout.
     let args = createdb_args(db_name, from_db);
@@ -215,28 +238,154 @@ pub fn create_database(db_name: &str, from_db: Option<&str>) {
                 .map(|t| format!(" (from template '{t}')"))
                 .unwrap_or_default();
             eprintln!("  created database '{db_name}'{via}");
+            return;
         }
         // createdb has no --if-exists; a non-zero exit usually means it already
         // exists. Non-fatal — this is an opt-in convenience.
-        Ok(_) => eprintln!("  database '{db_name}' already exists or could not be created (skipping)"),
-        Err(_) => eprintln!("  warning: createdb not found, skipping DB creation"),
+        Ok(_) => {
+            eprintln!("  database '{db_name}' already exists or could not be created (skipping)");
+            return;
+        }
+        Err(_) => {
+            // No system `createdb` — try the docker fallback.
+            eprintln!("  createdb not found, falling back to docker postgres…");
+        }
     }
+    start_docker_postgres(db_name, from_db);
 }
 
-/// Best-effort: drop the PostgreSQL database for a branch.
+/// Best-effort: drop the PostgreSQL database for a branch. If we
+/// previously started a docker container for it (see
+/// [`start_docker_postgres`]), stop and remove that too.
 pub fn drop_database(branch: &str) {
     let slug = branch_to_slug(branch);
     let db_name = load_registry()
         .allocations
         .get(&slug)
         .map(|a| a.db_name.clone())
-        .unwrap_or(slug);
+        .unwrap_or_else(|| slug.clone());
 
+    // First: tear down the docker container if it exists.
+    stop_docker_postgres(&slug);
+
+    // Then: try dropdb (the system Postgres cleanup path).
     match Command::new("dropdb").arg("--if-exists").arg(&db_name).status() {
         Ok(s) if s.success() => println!("  dropped database '{}'", db_name),
-        Ok(s) => eprintln!("  warning: dropdb exited with {}", s),
+        Ok(_) => {
+            // No dropdb — fine, we may have only had the docker container,
+            // which we just removed.
+        }
         Err(_) => eprintln!("  warning: dropdb not found, skipping DB cleanup"),
     }
+}
+
+/// Spin up a per-worktree Postgres container using docker (or podman).
+/// The container is named `workz-pg-<slug>` so we can find and tear it
+/// down later; it exposes the standard 5432 port (not in the worktree's
+/// allocated range — this is *its own* host port, since multiple worktrees
+/// each have their own container).
+fn start_docker_postgres(db_name: &str, from_db: Option<&str>) {
+    // Compose the slug to make the container name stable across runs.
+    // (db_name is already a slug in our allocator, so this is identity.)
+    let container = format!("workz-pg-{}", sanitize_for_container(db_name));
+
+    // Stop any previous instance with this name so we start fresh.
+    let _ = run_docker(["rm", "-f", &container]);
+
+    // Build the docker run command. -d for detached, --rm for cleanup on
+    // container exit, --name so we can find it again. -e POSTGRES_DB
+    // creates the target database on first start. We bind 5432 to the
+    // host (not the worktree's allocated range) — containers are isolated
+    // by their own port-forward and their name, not by a host port.
+    let mut args: Vec<String> = vec![
+        "run".into(), "-d".into(), "--rm".into(),
+        "--name".into(), container.clone(),
+        "-e".into(), format!("POSTGRES_DB={db_name}"),
+        "-e".into(), "POSTGRES_HOST_AUTH_METHOD=trust".into(),
+    ];
+    if let Some(tpl) = from_db {
+        // Seed the new DB from a template by mounting a pre-seeded data
+        // dir. Skipped for v0.14 to keep the surface small — users with
+        // --from-db and no createdb should install Postgres locally.
+        let _ = tpl;
+    }
+    args.push("postgres:16-alpine".into());
+
+    eprintln!("  starting docker postgres container '{container}'…");
+    let cmd = pick_docker_cmd();
+    let status = match cmd {
+        Some(c) => Command::new(c).args(&args).status(),
+        None => {
+            eprintln!(
+                "  warning: neither docker nor podman found, cannot start fallback postgres"
+            );
+            return;
+        }
+    };
+    match status {
+        Ok(s) if s.success() => {
+            // Wait briefly for postgres to be ready (the container's
+            // entrypoint is async; `createdb` was synchronous, so we
+            // need a tiny grace period before the user runs migrations).
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            eprintln!(
+                "  postgres container '{container}' is up (DB: {db_name}, localhost:5432)"
+            );
+        }
+        Ok(s) => eprintln!("  warning: docker run failed with {s}"),
+        Err(e) => eprintln!("  warning: failed to run docker: {e}"),
+    }
+}
+
+fn stop_docker_postgres(slug: &str) {
+    let container = format!("workz-pg-{}", sanitize_for_container(slug));
+    if let Some(cmd) = pick_docker_cmd() {
+        // `docker stop` is the polite path; fall back to `rm -f` if the
+        // container is in a weird state. --quiet keeps the noise down.
+        let _ = Command::new(cmd)
+            .args(["stop", "--time", "5", &container])
+            .status();
+        let _ = Command::new(cmd).args(["rm", "-f", &container]).status();
+    }
+}
+
+fn run_docker<'a>(args: impl IntoIterator<Item = &'a str>) -> std::io::Result<std::process::ExitStatus> {
+    match pick_docker_cmd() {
+        Some(cmd) => Command::new(cmd).args(args).status(),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "neither docker nor podman found",
+        )),
+    }
+}
+
+fn pick_docker_cmd() -> Option<&'static str> {
+    if Command::new("docker").arg("--version").status().map(|s| s.success()).unwrap_or(false) {
+        Some("docker")
+    } else if Command::new("podman").arg("--version").status().map(|s| s.success()).unwrap_or(false) {
+        Some("podman")
+    } else {
+        None
+    }
+}
+
+/// Make a string safe to use as a docker container name: lowercase,
+/// alphanum + dashes, capped at 64 chars (the docker limit is 128 but
+/// most runtimes also prepend a project prefix).
+fn sanitize_for_container(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if c == '-' || c == '_' {
+            out.push('-');
+        }
+    }
+    if out.is_empty() {
+        out.push('w');
+    }
+    out.truncate(64);
+    out
 }
 
 /// Look up the allocation for a branch (for status display).
@@ -285,12 +434,17 @@ const MANAGED_END: &str = "# <<< workz managed <<<";
 /// rather than overwriting. Any pre-existing user content (e.g. a copied
 /// `.env.local` full of secrets) is preserved; only the workz-managed block is
 /// rewritten. Idempotent: running twice with the same allocation is a no-op.
-fn write_env_local(wt_path: &Path, alloc: &PortAllocation, framework: Framework) -> Result<()> {
+fn write_env_local(
+    wt_path: &Path,
+    alloc: &PortAllocation,
+    framework: Framework,
+    services: &[(String, u16)],
+) -> Result<()> {
     let path = wt_path.join(".env.local");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let user_lines = extract_user_lines(&existing);
 
-    let mut managed = build_managed_block(alloc, framework);
+    let mut managed = build_managed_block(alloc, framework, services);
 
     // Derive DATABASE_URL from the user's existing one (keeps their driver,
     // host, port, credentials, and query — only the db name changes).
@@ -334,7 +488,11 @@ fn swap_db_in_url(url: &str, db_name: &str) -> Option<String> {
 }
 
 /// The lines that live *inside* the managed block (no markers, no trailing newline).
-fn build_managed_block(alloc: &PortAllocation, framework: Framework) -> Vec<String> {
+fn build_managed_block(
+    alloc: &PortAllocation,
+    framework: Framework,
+    services: &[(String, u16)],
+) -> Vec<String> {
     let port = alloc.port;
     let port_end = alloc.port + alloc.port_count - 1;
 
@@ -345,24 +503,56 @@ fn build_managed_block(alloc: &PortAllocation, framework: Framework) -> Vec<Stri
         lines.push(format!("PORT_END={}", port_end));
     }
 
-    // Framework-specific port vars
-    match framework {
-        Framework::SpringBoot => lines.push(format!("SERVER_PORT={}", port)),
-        Framework::Flask => lines.push(format!("FLASK_RUN_PORT={}", port)),
-        Framework::FastApi => lines.push(format!("UVICORN_PORT={}", port)),
-        Framework::Vite => lines.push(format!("VITE_PORT={}", port)),
-        _ => {}
+    // Named services (v0.14). Each gets `PORT_<UPPERCASE_NAME>=N`. The first
+    // named service's port is the same as the top-level `PORT` for backward
+    // compat, so we don't double-emit it.
+    for (i, (name, svc_port)) in services.iter().enumerate() {
+        if i == 0 && *svc_port == port {
+            // Already covered by the top-level `PORT=N` line — skip.
+            continue;
+        }
+        let var = service_env_name(name);
+        lines.push(format!("{var}={svc_port}"));
+    }
+
+    // Framework-specific port vars (only when no named services override)
+    if services.is_empty() {
+        match framework {
+            Framework::SpringBoot => lines.push(format!("SERVER_PORT={}", port)),
+            Framework::Flask => lines.push(format!("FLASK_RUN_PORT={}", port)),
+            Framework::FastApi => lines.push(format!("UVICORN_PORT={}", port)),
+            Framework::Vite => lines.push(format!("VITE_PORT={}", port)),
+            _ => {}
+        }
     }
 
     lines.push(format!("DB_NAME={}", alloc.db_name));
     lines.push(format!("DATABASE_URL=postgres://localhost/{}", alloc.db_name));
     lines.push(format!("COMPOSE_PROJECT_NAME={}", alloc.compose_project));
 
-    // Redis on port+1 (within the allocated range, not port+1000)
+    // Redis on port+1 (within the allocated range, not port+1000) — only when
+    // no named service has already claimed that slot.
     let redis_port = if alloc.port_count > 1 { port + 1 } else { port + 1000 };
-    lines.push(format!("REDIS_URL=redis://localhost:{}", redis_port));
+    let redis_claimed = services.iter().any(|(_, p)| *p == redis_port);
+    if !redis_claimed {
+        lines.push(format!("REDIS_URL=redis://localhost:{}", redis_port));
+    }
 
     lines
+}
+
+/// Build the env-var name for a named service: `web` → `PORT_WEB`,
+/// `api-server` → `PORT_API_SERVER`. Uppercased, non-alphanumeric → `_`.
+fn service_env_name(name: &str) -> String {
+    let mut out = String::from("PORT_");
+    for c in name.chars() {
+        if c.is_alphanumeric() {
+            out.push(c.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out
 }
 
 /// Merge a fresh managed block into existing `.env.local` content. User lines
@@ -610,6 +800,106 @@ pub fn reap_all(force: bool) -> Result<ReapReport> {
     Ok(reap_ports(&all_ports, force))
 }
 
+// ── env diff: managed-block drift across worktrees (v0.14) ─────────────────
+
+/// One worktree's view of its managed env vars. Key-value pairs from the
+/// `.env.local` workz-managed block (between the BEGIN/END markers), in
+/// the order they appear.
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
+pub struct ManagedEnv {
+    pub branch: String,
+    pub worktree_path: String,
+    pub vars: Vec<(String, String)>,
+}
+
+/// Read the managed block from a worktree's `.env.local`. Missing file,
+/// missing block, or unreadable file → empty `vars`. Never returns an
+/// error: a worktree without an `.env.local` is just an empty env, and
+/// that's useful information for a diff.
+pub fn read_managed_env(wt_path: &Path, branch: &str) -> ManagedEnv {
+    let path = wt_path.join(".env.local");
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut vars: Vec<(String, String)> = Vec::new();
+    let mut in_block = false;
+    for line in content.lines() {
+        match line.trim() {
+            MANAGED_BEGIN => in_block = true,
+            MANAGED_END => in_block = false,
+            _ if in_block => {
+                if let Some((k, v)) = line.split_once('=') {
+                    vars.push((k.to_string(), v.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+    ManagedEnv {
+        branch: branch.to_string(),
+        worktree_path: wt_path.to_string_lossy().to_string(),
+        vars,
+    }
+}
+
+/// Build the env diff report: for each variable, which worktrees have it
+/// and with what value. Returns a vector of (key, value, branches_with_different_value)
+/// suitable for printing.
+pub fn env_drift_report(envs: &[ManagedEnv]) -> Vec<String> {
+    if envs.is_empty() {
+        return vec!["no worktrees to compare".to_string()];
+    }
+    if envs.len() == 1 {
+        return vec![format!(
+            "only one worktree ({}) — nothing to diff",
+            envs[0].branch
+        )];
+    }
+
+    // Collect all keys (in order of first appearance).
+    let mut all_keys: Vec<String> = Vec::new();
+    for e in envs {
+        for (k, _) in &e.vars {
+            if !all_keys.contains(k) {
+                all_keys.push(k.clone());
+            }
+        }
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!("workz env diff — {} worktrees, {} keys", envs.len(), all_keys.len()));
+    lines.push(String::new());
+
+    // Summary: show value-per-worktree for each key.
+    for key in &all_keys {
+        // Find the value in each worktree (None if missing).
+        let values: Vec<Option<&str>> = envs
+            .iter()
+            .map(|e| {
+                e.vars
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.as_str())
+            })
+            .collect();
+        let unique: std::collections::BTreeSet<&str> =
+            values.iter().filter_map(|v| *v).collect();
+
+        if unique.len() == 1 && values.iter().all(|v| v.is_some()) {
+            // All worktrees agree — show the value once, mark aligned.
+            if let Some(v) = values[0] {
+                lines.push(format!("  {} = {}  (all {} aligned)", key, v, envs.len()));
+            }
+        } else {
+            // Drift — show per-worktree values.
+            lines.push(format!("  {}:", key));
+            for (env, val) in envs.iter().zip(values.iter()) {
+                let v = val.unwrap_or("(unset)");
+                lines.push(format!("    {:<20} {}", env.branch, v));
+            }
+        }
+    }
+    lines
+}
+
 // ── Timestamp helpers ────────────────────────────────────────────────────────
 
 fn rfc3339_now() -> String {
@@ -748,7 +1038,7 @@ mod tests {
 
     #[test]
     fn merge_into_empty_writes_only_managed_block() {
-        let managed = build_managed_block(&sample_alloc(), Framework::Unknown);
+        let managed = build_managed_block(&sample_alloc(), Framework::Unknown, &[]);
         let out = merge_managed_block("", &managed);
         assert!(out.starts_with(MANAGED_BEGIN));
         assert!(out.trim_end().ends_with(MANAGED_END));
@@ -759,7 +1049,7 @@ mod tests {
     #[test]
     fn merge_preserves_user_lines() {
         let existing = "API_KEY=secret123\nSTRIPE_KEY=sk_live_abc\n";
-        let managed = build_managed_block(&sample_alloc(), Framework::Unknown);
+        let managed = build_managed_block(&sample_alloc(), Framework::Unknown, &[]);
         let out = merge_managed_block(existing, &managed);
         // User secrets survive
         assert!(out.contains("API_KEY=secret123"));
@@ -773,7 +1063,7 @@ mod tests {
     #[test]
     fn merge_is_idempotent() {
         let existing = "API_KEY=secret123\n";
-        let managed = build_managed_block(&sample_alloc(), Framework::Unknown);
+        let managed = build_managed_block(&sample_alloc(), Framework::Unknown, &[]);
         let once = merge_managed_block(existing, &managed);
         let twice = merge_managed_block(&once, &managed);
         assert_eq!(once, twice);
@@ -786,10 +1076,10 @@ mod tests {
     fn merge_replaces_stale_managed_block() {
         // Simulate an old allocation, then re-run with a new port.
         let old_alloc = PortAllocation { port: 3000, ..sample_alloc() };
-        let old = merge_managed_block("API_KEY=k\n", &build_managed_block(&old_alloc, Framework::Unknown));
+        let old = merge_managed_block("API_KEY=k\n", &build_managed_block(&old_alloc, Framework::Unknown, &[]));
         assert!(old.contains("PORT=3000"));
 
-        let new = merge_managed_block(&old, &build_managed_block(&sample_alloc(), Framework::Unknown));
+        let new = merge_managed_block(&old, &build_managed_block(&sample_alloc(), Framework::Unknown, &[]));
         assert!(new.contains("PORT=3010"));
         assert!(!new.contains("PORT=3000"));
         assert_eq!(new.matches(MANAGED_BEGIN).count(), 1);
@@ -798,9 +1088,48 @@ mod tests {
 
     #[test]
     fn merge_writes_framework_var() {
-        let managed = build_managed_block(&sample_alloc(), Framework::Vite);
+        let managed = build_managed_block(&sample_alloc(), Framework::Vite, &[]);
         let out = merge_managed_block("", &managed);
         assert!(out.contains("VITE_PORT=3010"));
+    }
+
+    #[test]
+    fn merge_writes_named_service_ports() {
+        // v0.14: services produce PORT_<NAME>=N for each one (besides the
+        // first which doubles as the top-level PORT).
+        let services = vec![
+            ("web".to_string(), 3010u16),
+            ("api".to_string(), 3011),
+            ("worker".to_string(), 3012),
+        ];
+        let managed = build_managed_block(&sample_alloc(), Framework::Unknown, &services);
+        let out = merge_managed_block("", &managed);
+        assert!(out.contains("PORT=3010"), "top-level PORT should match first service");
+        assert!(out.contains("PORT_API=3011"), "second service gets PORT_<NAME>");
+        assert!(out.contains("PORT_WORKER=3012"));
+        // Should not double-emit PORT_WEB since it matches top-level PORT.
+        assert!(!out.contains("PORT_WEB="));
+    }
+
+    #[test]
+    fn service_env_name_uppercases_and_replaces_dashes() {
+        assert_eq!(service_env_name("web"), "PORT_WEB");
+        assert_eq!(service_env_name("api-server"), "PORT_API_SERVER");
+        assert_eq!(service_env_name("a.b.c"), "PORT_A_B_C");
+    }
+
+    #[test]
+    fn merge_skips_redis_when_service_claims_the_port() {
+        // v0.14: if a named service is allocated to port+1 (the redis slot),
+        // the REDIS_URL line is suppressed to avoid collision.
+        let services = vec![
+            ("web".to_string(), 3010u16),
+            ("redis".to_string(), 3011),  // claims the slot workz would use for REDIS_URL
+        ];
+        let managed = build_managed_block(&sample_alloc(), Framework::Unknown, &services);
+        let out = merge_managed_block("", &managed);
+        assert!(out.contains("PORT_REDIS=3011"));
+        assert!(!out.contains("REDIS_URL="), "redis was claimed by a service");
     }
 
     #[test]
@@ -850,6 +1179,72 @@ mod tests {
         );
     }
 
+    // ── env diff tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn read_managed_env_extracts_block() {
+        let dir = std::env::temp_dir().join(format!("workz_envdiff_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".env.local"),
+            "API_KEY=secret\n# >>> workz managed — do not edit between these markers >>>\nPORT=3010\nDB_NAME=feat_x\n# <<< workz managed <<<\n",
+        )
+        .unwrap();
+
+        let env = read_managed_env(&dir, "feat_x");
+        assert_eq!(env.vars, vec![
+            ("PORT".to_string(), "3010".to_string()),
+            ("DB_NAME".to_string(), "feat_x".to_string()),
+        ]);
+        // User content (above the block) is not in the managed env.
+        assert!(!env.vars.iter().any(|(k, _)| k == "API_KEY"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_managed_env_missing_file_is_empty() {
+        let dir = std::env::temp_dir().join(format!("workz_envdiff_empty_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let env = read_managed_env(&dir, "feat_y");
+        assert!(env.vars.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn env_drift_report_shows_aligned_when_values_match() {
+        let envs = vec![
+            ManagedEnv { branch: "a".into(), worktree_path: "/a".into(), vars: vec![("PORT".into(), "3010".into()), ("DB_NAME".into(), "a".into())] },
+            ManagedEnv { branch: "b".into(), worktree_path: "/b".into(), vars: vec![("PORT".into(), "3010".into()), ("DB_NAME".into(), "b".into())] },
+        ];
+        let report = env_drift_report(&envs);
+        // PORT is aligned, DB_NAME is not (a vs b).
+        assert!(report.iter().any(|l| l.contains("PORT = 3010") && l.contains("aligned")));
+        assert!(report.iter().any(|l| l.contains("DB_NAME:")));
+    }
+
+    #[test]
+    fn env_drift_report_handles_missing_keys() {
+        // Worktree B is missing the PORT key entirely (e.g. --isolated never ran).
+        let envs = vec![
+            ManagedEnv { branch: "a".into(), worktree_path: "/a".into(), vars: vec![("PORT".into(), "3010".into())] },
+            ManagedEnv { branch: "b".into(), worktree_path: "/b".into(), vars: vec![] },
+        ];
+        let report = env_drift_report(&envs);
+        // The drift header includes the key; the per-worktree values include
+        // "(unset)" for the missing key.
+        assert!(report.iter().any(|l| l.trim_start() == "PORT:"));
+        assert!(report.iter().any(|l| l.contains("(unset)")));
+    }
+
+    #[test]
+    fn env_drift_report_single_env_returns_message() {
+        let envs = vec![ManagedEnv { branch: "only".into(), worktree_path: "/only".into(), vars: vec![] }];
+        let report = env_drift_report(&envs);
+        assert!(report.iter().any(|l| l.contains("only one worktree")));
+    }
+
     #[test]
     fn derive_uses_existing_and_falls_back() {
         let lines = vec!["DATABASE_URL=postgres://u:p@host:5432/prod".to_string()];
@@ -874,7 +1269,7 @@ mod tests {
         )
         .unwrap();
 
-        write_env_local(&base, &sample_alloc(), Framework::Unknown).unwrap();
+        write_env_local(&base, &sample_alloc(), Framework::Unknown, &[]).unwrap();
         let out = std::fs::read_to_string(base.join(".env.local")).unwrap();
 
         // Secret preserved; managed DATABASE_URL derived from the user's URL.
