@@ -143,7 +143,8 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
             let isolated = args["isolated"].as_bool().unwrap_or(false);
 
             let root = git::repo_root()?;
-            let wt_path = git::worktree_path(&root, branch);
+            let config = config::load_config(&root)?;
+            let wt_path = git::worktree_path(&root, branch, config.worktree.dir.as_deref());
 
             if wt_path.exists() {
                 return Ok(format!(
@@ -152,7 +153,6 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
                 ));
             }
 
-            let config = config::load_config(&root)?;
             git::worktree_add(&wt_path, branch, base)?;
 
             let framework = if !no_sync {
@@ -291,7 +291,8 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
             let root = git::repo_root()?;
             let force = args["force"].as_bool().unwrap_or(false);
             let wt_path = if let Some(branch) = args["branch"].as_str() {
-                git::worktree_path(&root, branch)
+                let config = config::load_config(&root)?;
+                git::worktree_path(&root, branch, config.worktree.dir.as_deref())
             } else {
                 std::env::current_dir()?
             };

@@ -60,11 +60,29 @@ pub fn repo_name(root: &Path) -> String {
         .to_string()
 }
 
-/// Compute the worktree directory path: `../<repo>--<safe-branch>`.
-pub fn worktree_path(root: &Path, branch: &str) -> PathBuf {
+/// Compute the worktree directory path for `branch`.
+///
+/// Default (no `[worktree] dir` configured): `../<repo>--<safe-branch>`, placed
+/// next to the main checkout. When a directory is configured, worktrees go under
+/// `<dir>/<safe-branch>` — a relative `dir` resolves against the repo root (so
+/// `.worktrees` nests them inside the project), an absolute `dir` is used as-is.
+/// `safe-branch` is the branch name with `/` and `\` replaced by `-`.
+pub fn worktree_path(root: &Path, branch: &str, dir: Option<&str>) -> PathBuf {
     let safe = branch.replace(['/', '\\'], "-");
-    let base = root.parent().unwrap_or(root);
-    base.join(format!("{}--{}", repo_name(root), safe))
+    match dir {
+        Some(d) if !d.is_empty() => {
+            let base = if Path::new(d).is_absolute() {
+                PathBuf::from(d)
+            } else {
+                root.join(d)
+            };
+            base.join(safe)
+        }
+        _ => {
+            let base = root.parent().unwrap_or(root);
+            base.join(format!("{}--{}", repo_name(root), safe))
+        }
+    }
 }
 
 /// Check whether a local branch exists.
@@ -377,6 +395,34 @@ pub fn drop_stash(target: &Path, stash_commit: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_path_default_uses_parent_repo_prefix() {
+        let root = Path::new("/home/me/projects/myapp");
+        let p = worktree_path(root, "feature/add-auth", None);
+        assert_eq!(p, Path::new("/home/me/projects/myapp--feature-add-auth"));
+    }
+
+    #[test]
+    fn worktree_path_relative_dir_nests_in_repo() {
+        let root = Path::new("/home/me/projects/myapp");
+        let p = worktree_path(root, "feature/add-auth", Some(".worktrees"));
+        assert_eq!(p, Path::new("/home/me/projects/myapp/.worktrees/feature-add-auth"));
+    }
+
+    #[test]
+    fn worktree_path_absolute_dir_used_verbatim() {
+        let root = Path::new("/home/me/projects/myapp");
+        let p = worktree_path(root, "bugfix", Some("/tmp/wt"));
+        assert_eq!(p, Path::new("/tmp/wt/bugfix"));
+    }
+
+    #[test]
+    fn worktree_path_empty_dir_falls_back_to_default() {
+        let root = Path::new("/home/me/projects/myapp");
+        let p = worktree_path(root, "x", Some(""));
+        assert_eq!(p, Path::new("/home/me/projects/myapp--x"));
+    }
 
     #[test]
     fn modified_files_keeps_first_char() {

@@ -13,6 +13,24 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub isolation: IsolationConfig,
+    #[serde(default)]
+    pub worktree: WorktreeConfig,
+}
+
+/// Where new worktrees are placed. Zero-config default keeps today's behavior
+/// (`../<repo>--<branch>` next to the main checkout).
+#[derive(Debug, Default, Deserialize)]
+pub struct WorktreeConfig {
+    /// Directory to create worktrees in. A relative path resolves against the
+    /// repo root (so `.worktrees` nests them inside the project, Claude
+    /// Code–style); an absolute path is used verbatim. When unset, worktrees go
+    /// in the parent directory as `<repo>--<branch>`. The leaf directory is the
+    /// branch name with `/` and `\` replaced by `-`.
+    ///
+    /// If you point this inside the repo, add the directory to `.gitignore` so
+    /// git doesn't treat the nested worktrees as untracked files.
+    #[serde(default)]
+    pub dir: Option<String>,
 }
 
 /// How a single directory/entry should be handled, overriding the default.
@@ -330,7 +348,11 @@ fn merge_configs(global: Config, project: Config) -> Config {
         global.isolation
     };
 
-    Config { sync, hooks, isolation }
+    let worktree = WorktreeConfig {
+        dir: project.worktree.dir.or(global.worktree.dir),
+    };
+
+    Config { sync, hooks, isolation, worktree }
 }
 
 /// Concatenate two vecs (global first, then project).
@@ -438,6 +460,25 @@ mod tests {
         let merged = merge_configs(global, project);
         // Project didn't set symlink → global's value survives (the old bug lost this).
         assert_eq!(merged.sync.symlink, Some(vec!["g1".to_string()]));
+    }
+
+    #[test]
+    fn worktree_dir_parses_and_merges() {
+        // Project sets it → used.
+        let cfg = toml::from_str::<Config>("[worktree]\ndir = \".worktrees\"\n").unwrap();
+        assert_eq!(cfg.worktree.dir.as_deref(), Some(".worktrees"));
+
+        // Project unset → global's value survives the merge.
+        let global = toml::from_str::<Config>("[worktree]\ndir = \"/tmp/wt\"\n").unwrap();
+        let project = toml::from_str::<Config>("[hooks]\npost_start = \"echo hi\"\n").unwrap();
+        let merged = merge_configs(global, project);
+        assert_eq!(merged.worktree.dir.as_deref(), Some("/tmp/wt"));
+
+        // Project set → project wins over global.
+        let global = toml::from_str::<Config>("[worktree]\ndir = \"/tmp/wt\"\n").unwrap();
+        let project = toml::from_str::<Config>("[worktree]\ndir = \".wt\"\n").unwrap();
+        let merged = merge_configs(global, project);
+        assert_eq!(merged.worktree.dir.as_deref(), Some(".wt"));
     }
 
     #[test]

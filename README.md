@@ -192,6 +192,9 @@ ignore_add  = ["logs"]
 [sync.overrides]
 node_modules = "copy"
 
+[worktree]
+dir = ".worktrees"                 # where worktrees are created (see below)
+
 [hooks]
 post_start = "pnpm install --frozen-lockfile"
 pre_done   = "docker compose down"
@@ -202,6 +205,36 @@ port_range_size = 10
 ```
 
 Zero config works out of the box for Node, Rust, Python, Go, and Java. Run `workz doctor` if anything looks off.
+
+### Worktree placement
+
+By default worktrees are created next to the main checkout as `../<repo>--<branch>`. Set `[worktree] dir` to place them somewhere else:
+
+- A **relative** path resolves against the repo root — `dir = ".worktrees"` nests them inside the project (Claude Code–style), keeping your parent directory uncluttered. Add the directory to `.gitignore` so git doesn't see the nested worktrees as untracked files.
+- An **absolute** path is used verbatim — `dir = "/tmp/wt"` puts every worktree under `/tmp/wt/<branch>`.
+
+The leaf directory is the branch name with `/` and `\` replaced by `-`.
+
+### Hook environment
+
+`post_start` runs after the worktree is fully provisioned — dependencies synced and, with `--isolated`, `.env.local` written — so it can read the managed vars. workz also exports the worktree context so a hook doesn't have to re-derive it:
+
+| Variable | Meaning |
+|----------|---------|
+| `WORKZ_BRANCH` | Branch name |
+| `WORKZ_SLUG` | Slugified branch (e.g. `feature/add-auth` → `feature_add_auth`) |
+| `WORKZ_WORKTREE` | Absolute path of the new worktree |
+| `WORKZ_REPO` | Repository name |
+| `WORKZ_ROOT` | Absolute path of the main checkout |
+| `WORKZ_FRAMEWORK` | Detected framework (`vite`, `flask`, `unknown`, …) |
+| `WORKZ_PORT`, `WORKZ_PORT_END`, `WORKZ_DB_NAME`, `WORKZ_COMPOSE_PROJECT` | Allocated values — only with `--isolated` |
+
+For example, a per-worktree test database:
+
+```toml
+[hooks]
+post_start = 'createdb -T myapp_test "myapp_test_$WORKZ_SLUG"'
+```
 
 ## MCP server
 

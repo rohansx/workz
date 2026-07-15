@@ -148,7 +148,8 @@ fn cmd_start(
     carry_from: Option<&str>,
 ) -> Result<()> {
     let root = git::repo_root()?;
-    let wt_path = git::worktree_path(&root, branch);
+    let config = config::load_config(&root)?;
+    let wt_path = git::worktree_path(&root, branch, config.worktree.dir.as_deref());
 
     if wt_path.exists() {
         println!("worktree already exists at {}", wt_path.display());
@@ -194,8 +195,6 @@ fn cmd_start(
         }
     }
 
-    let config = config::load_config(&root)?;
-
     let framework = if !no_sync {
         let report =
             sync::sync_worktree(&root, &wt_path, &config.sync, sync::SyncOptions::default())?;
@@ -203,24 +202,12 @@ fn cmd_start(
         for w in &report.warnings {
             eprintln!("  warning: {w}");
         }
-
-        // Run post_start hook if configured
-        if let Some(hook) = &config.hooks.post_start {
-            println!("  running post_start hook...");
-            let status = Command::new("sh")
-                .args(["-c", hook])
-                .current_dir(&wt_path)
-                .status()?;
-            if !status.success() {
-                eprintln!("  warning: post_start hook exited with {}", status);
-            }
-        }
         report.framework
     } else {
         sync::Framework::Unknown
     };
 
-    if isolated {
+    let iso = if isolated {
         let iso = isolation::setup_isolation(
             branch,
             &wt_path,
@@ -253,8 +240,20 @@ fn cmd_start(
         if create_db || from_db.is_some() {
             isolation::create_database(&iso.db_name, from_db);
         }
-    } else if create_db || from_db.is_some() {
-        eprintln!("  note: --create-db requires --isolated (skipping)");
+        Some(iso)
+    } else {
+        if create_db || from_db.is_some() {
+            eprintln!("  note: --create-db requires --isolated (skipping)");
+        }
+        None
+    };
+
+    // Run the post_start hook last, once the worktree is fully provisioned:
+    // deps synced AND (when --isolated) .env.local written. This lets hooks read
+    // the managed vars — and the WORKZ_* vars we export below give them the
+    // worktree slug/branch/paths without re-deriving them by hand (issue #12).
+    if let Some(hook) = &config.hooks.post_start {
+        run_post_start_hook(hook, &root, &wt_path, branch, framework, iso.as_ref())?;
     }
 
     if docker {
@@ -270,30 +269,112 @@ fn cmd_start(
     Ok(())
 }
 
+/// Run the configured `post_start` hook with the workz context exported as
+/// environment variables. The hook always sees `WORKZ_BRANCH`, `WORKZ_SLUG`,
+/// `WORKZ_WORKTREE`, `WORKZ_REPO`, `WORKZ_ROOT`, and `WORKZ_FRAMEWORK`; when the
+/// worktree was created `--isolated`, it also sees the allocated `WORKZ_PORT`,
+/// `WORKZ_PORT_END`, `WORKZ_DB_NAME`, and `WORKZ_COMPOSE_PROJECT`. This is what
+/// lets a hook name a per-worktree database without re-deriving the slug from
+/// `git branch` (issue #12).
+fn run_post_start_hook(
+    hook: &str,
+    root: &Path,
+    wt_path: &Path,
+    branch: &str,
+    framework: sync::Framework,
+    iso: Option<&isolation::IsolationConfig>,
+) -> Result<()> {
+    println!("  running post_start hook...");
+
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", hook])
+        .current_dir(wt_path)
+        .env("WORKZ_BRANCH", branch)
+        .env("WORKZ_SLUG", isolation::branch_to_slug(branch))
+        .env("WORKZ_WORKTREE", wt_path)
+        .env("WORKZ_REPO", git::repo_name(root))
+        .env("WORKZ_ROOT", root)
+        .env("WORKZ_FRAMEWORK", format!("{framework:?}").to_lowercase());
+
+    if let Some(iso) = iso {
+        command
+            .env("WORKZ_PORT", iso.port.to_string())
+            .env("WORKZ_PORT_END", iso.port_end.to_string())
+            .env("WORKZ_DB_NAME", &iso.db_name)
+            .env("WORKZ_COMPOSE_PROJECT", &iso.compose_project);
+    }
+
+    let status = command.status()?;
+    if !status.success() {
+        eprintln!("  warning: post_start hook exited with {}", status);
+    }
+    Ok(())
+}
+
 fn launch_ai_tool(tool: &AiTool, path: &std::path::Path) -> Result<()> {
     let path_str = path.to_str().unwrap_or(".");
 
-    let (cmd, args): (&str, Vec<&str>) = match tool {
-        AiTool::Claude => ("claude", vec!["--worktree"]),
-        AiTool::Cursor => ("cursor", vec![path_str]),
-        AiTool::Code => ("code", vec![path_str]),
-        AiTool::Windsurf => ("windsurf", vec![path_str]),
-        AiTool::Aider => ("aider", vec![]),
-        AiTool::Codex => ("codex", vec![]),
-        AiTool::Gemini => ("gemini", vec![]),
+    // `interactive` marks terminal UIs (as opposed to GUI editors that fork and
+    // return). workz already created and cd'd into the worktree, so the CLI
+    // agents must NOT be told to make their own worktree — passing `--worktree`
+    // to Claude Code made it spin up a nested worktree and corrupted the shell
+    // (see issue #11). They just run in `path`.
+    let (cmd, args, interactive): (&str, Vec<&str>, bool) = match tool {
+        AiTool::Claude => ("claude", vec![], true),
+        AiTool::Cursor => ("cursor", vec![path_str], false),
+        AiTool::Code => ("code", vec![path_str], false),
+        AiTool::Windsurf => ("windsurf", vec![path_str], false),
+        AiTool::Aider => ("aider", vec![], true),
+        AiTool::Codex => ("codex", vec![], true),
+        AiTool::Gemini => ("gemini", vec![], true),
     };
 
-    if which_exists(cmd) {
-        println!("  launching {}...", tool);
-        Command::new(cmd)
-            .args(&args)
-            .current_dir(path)
-            .spawn()?;
-    } else {
+    if !which_exists(cmd) {
         eprintln!("  warning: '{}' not found in PATH, skipping", cmd);
+        return Ok(());
+    }
+
+    println!("  launching {}...", tool);
+    let mut command = Command::new(cmd);
+    command.args(&args).current_dir(path);
+
+    if interactive {
+        // The shell wrapper runs `workz` inside a command substitution
+        // (`result=$(command workz "$@" 2>&1)`), so our stdout/stderr are a
+        // captured pipe, not the terminal. Handing an interactive TUI that pipe
+        // corrupts the display — its cursor/query escape sequences get replayed
+        // as shell commands (the `fish: Unknown command` spew in issue #11).
+        // Wire the child straight to the controlling terminal instead, and wait
+        // for it so the `cd` sentinel is emitted only after the session ends.
+        match tty_stdio() {
+            Some((stdin, stdout, stderr)) => {
+                command.stdin(stdin).stdout(stdout).stderr(stderr);
+                command.status()?;
+            }
+            None => {
+                // No controlling terminal (e.g. launched from a script) —
+                // fall back to inheriting whatever fds we have.
+                command.spawn()?;
+            }
+        }
+    } else {
+        // GUI editors detach on their own; a background spawn is correct.
+        command.spawn()?;
     }
 
     Ok(())
+}
+
+/// Open the controlling terminal (`/dev/tty`) as stdio for an interactive child,
+/// bypassing the shell wrapper's captured pipe. Returns `None` when there is no
+/// controlling terminal, so the caller can fall back to inheriting fds.
+fn tty_stdio() -> Option<(std::process::Stdio, std::process::Stdio, std::process::Stdio)> {
+    use std::fs::OpenOptions;
+    let stdin = OpenOptions::new().read(true).open("/dev/tty").ok()?;
+    let stdout = OpenOptions::new().write(true).open("/dev/tty").ok()?;
+    let stderr = OpenOptions::new().write(true).open("/dev/tty").ok()?;
+    Some((stdin.into(), stdout.into(), stderr.into()))
 }
 
 fn launch_docker(path: &std::path::Path) -> Result<()> {
@@ -545,9 +626,13 @@ fn cmd_done(
     compose_volumes: bool,
 ) -> Result<()> {
     let root = git::repo_root()?;
+    let config = config::load_config(&root)?;
 
     let (wt_path, branch_name) = if let Some(b) = branch {
-        (git::worktree_path(&root, b), b.to_string())
+        (
+            git::worktree_path(&root, b, config.worktree.dir.as_deref()),
+            b.to_string(),
+        )
     } else {
         let cwd = std::env::current_dir()?;
         let branch_name = git::current_branch(&cwd)?;
@@ -588,7 +673,6 @@ fn cmd_done(
     }
 
     // Run pre_done hook if configured
-    let config = config::load_config(&root)?;
     if let Some(hook) = &config.hooks.pre_done {
         println!("  running pre_done hook...");
         let status = Command::new("sh")
