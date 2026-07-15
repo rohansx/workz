@@ -3,6 +3,33 @@
 All notable changes to workz are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Configurable worktree placement** (`[worktree] dir` in `.workz.toml`).
+  A relative path resolves against the repo root (`dir = ".worktrees"` nests
+  worktrees inside the project, Claude Code–style); an absolute path is used
+  verbatim. Default behavior is unchanged: `../<repo>--<branch>` next to the
+  main checkout. (#13)
+
+- **`post_start` hook environment.** The hook now runs after the worktree is
+  fully provisioned (deps synced and, with `--isolated`, `.env.local` written)
+  and receives the worktree context as environment variables: `WORKZ_BRANCH`,
+  `WORKZ_SLUG`, `WORKZ_WORKTREE`, `WORKZ_REPO`, `WORKZ_ROOT`, `WORKZ_FRAMEWORK`,
+  plus `WORKZ_PORT`/`WORKZ_PORT_END`/`WORKZ_DB_NAME`/`WORKZ_COMPOSE_PROJECT`
+  when isolated. Hooks that spin up a per-worktree database no longer have to
+  re-derive the slug from `git branch`. (#12)
+
+### Fixed
+
+- **`workz start <branch> --ai` no longer corrupts the terminal.** workz was
+  passing `--worktree` to Claude Code, which made it create a *nested*
+  worktree; combined with launching the TUI on the shell wrapper's captured
+  pipe, this spewed escape sequences into the shell. Interactive agents
+  (Claude, Aider, Codex, Gemini) now launch attached to the controlling
+  terminal with no `--worktree` flag. (#11)
+
 ## [0.14.0] ("Services")
 
 The runtime story for monorepos and per-worktree databases. Named service
