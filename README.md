@@ -217,23 +217,24 @@ The leaf directory is the branch name with `/` and `\` replaced by `-`.
 
 ### Hook environment
 
-`post_start` runs after the worktree is fully provisioned — dependencies synced and, with `--isolated`, `.env.local` written — so it can read the managed vars. workz also exports the worktree context so a hook doesn't have to re-derive it:
+The `post_start` and `pre_done` hooks receive the worktree context as environment variables, so a hook doesn't have to re-derive it. `post_start` runs after the worktree is fully provisioned — dependencies synced and, with `--isolated`, `.env.local` written — so it can read the managed vars.
 
 | Variable | Meaning |
 |----------|---------|
 | `WORKZ_BRANCH` | Branch name |
 | `WORKZ_SLUG` | Slugified branch (e.g. `feature/add-auth` → `feature_add_auth`) |
-| `WORKZ_WORKTREE` | Absolute path of the new worktree |
+| `WORKZ_WORKTREE` | Absolute path of the worktree |
 | `WORKZ_REPO` | Repository name |
 | `WORKZ_ROOT` | Absolute path of the main checkout |
-| `WORKZ_FRAMEWORK` | Detected framework (`vite`, `flask`, `unknown`, …) |
-| `WORKZ_PORT`, `WORKZ_PORT_END`, `WORKZ_DB_NAME`, `WORKZ_COMPOSE_PROJECT` | Allocated values — only with `--isolated` |
+| `WORKZ_FRAMEWORK` | Detected framework (`vite`, `flask`, `unknown`, …) — `post_start` only |
+| `WORKZ_PORT`, `WORKZ_PORT_END`, `WORKZ_DB_NAME`, `WORKZ_COMPOSE_PROJECT` | Allocated values — only when the worktree is isolated |
 
-For example, a per-worktree test database:
+For example, a per-worktree test database created on start and dropped on teardown:
 
 ```toml
 [hooks]
 post_start = 'createdb -T myapp_test "myapp_test_$WORKZ_SLUG"'
+pre_done   = 'dropdb --if-exists "myapp_test_$WORKZ_SLUG"'
 ```
 
 ## MCP server

@@ -199,6 +199,28 @@ pub fn setup_isolation(
     })
 }
 
+/// Look up the current isolation allocation for `branch`, if one exists.
+///
+/// Read-only — unlike `release_isolation` it leaves the registry untouched, so
+/// teardown code can read the allocated port/db (e.g. to hand a `pre_done` hook
+/// `WORKZ_DB_NAME`/`WORKZ_PORT`) before the allocation is released. Returns
+/// `None` when the branch was never isolated. `services` is left empty: the
+/// per-service port breakdown isn't persisted in the registry, and hooks only
+/// need the top-level port range and db/compose names.
+pub fn lookup_isolation(branch: &str) -> Option<IsolationConfig> {
+    let slug = branch_to_slug(branch);
+    let registry = load_registry();
+    let alloc = registry.allocations.get(&slug)?;
+    Some(IsolationConfig {
+        port: alloc.port,
+        port_end: alloc.port + alloc.port_count - 1,
+        port_count: alloc.port_count,
+        db_name: alloc.db_name.clone(),
+        compose_project: alloc.compose_project.clone(),
+        services: Vec::new(),
+    })
+}
+
 /// Release a port allocation. Called by cmd_done.
 pub fn release_isolation(branch: &str) -> Result<()> {
     let slug = branch_to_slug(branch);
