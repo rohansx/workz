@@ -284,7 +284,9 @@ fn cmd_start(
     // the managed vars — and the WORKZ_* vars we export below give them the
     // worktree slug/branch/paths without re-deriving them by hand (issue #12).
     if let Some(hook) = &config.hooks.post_start {
-        run_post_start_hook(hook, &root, &wt_path, branch, framework, iso.as_ref())?;
+        let alloc = iso.as_ref().map(HookAllocation::from);
+        let vars = hook_env_vars(&root, &wt_path, branch, Some(framework), alloc.as_ref());
+        run_hook("post_start", hook, &wt_path, &vars)?;
     }
 
     if docker {
@@ -300,62 +302,93 @@ fn cmd_start(
     Ok(())
 }
 
-/// Export the worktree context onto a hook `command` as environment variables.
-///
-/// The hook always sees `WORKZ_BRANCH`, `WORKZ_SLUG`, `WORKZ_WORKTREE`,
-/// `WORKZ_REPO`, and `WORKZ_ROOT`. `WORKZ_FRAMEWORK` is set only when a
-/// `framework` is known (it isn't at teardown, where nothing is synced). When
-/// the worktree was `--isolated`, the allocated `WORKZ_PORT`, `WORKZ_PORT_END`,
-/// `WORKZ_DB_NAME`, and `WORKZ_COMPOSE_PROJECT` are added too. This is what lets
-/// a hook name a per-worktree database without re-deriving the slug from
-/// `git branch` (issue #12).
-fn export_hook_env(
-    command: &mut Command,
+/// The allocated isolation values a hook receives — one shape for both hook
+/// paths: `post_start` has a fresh [`isolation::IsolationConfig`], `pre_done`
+/// only has the registry's [`isolation::PortAllocation`].
+struct HookAllocation {
+    port: u16,
+    port_end: u16,
+    db_name: String,
+    compose_project: String,
+}
+
+impl From<&isolation::IsolationConfig> for HookAllocation {
+    fn from(iso: &isolation::IsolationConfig) -> Self {
+        Self {
+            port: iso.port,
+            port_end: iso.port_end,
+            db_name: iso.db_name.clone(),
+            compose_project: iso.compose_project.clone(),
+        }
+    }
+}
+
+impl From<&isolation::PortAllocation> for HookAllocation {
+    fn from(alloc: &isolation::PortAllocation) -> Self {
+        Self {
+            port: alloc.port,
+            port_end: alloc.port + alloc.port_count - 1,
+            db_name: alloc.db_name.clone(),
+            compose_project: alloc.compose_project.clone(),
+        }
+    }
+}
+
+/// The `WORKZ_*` environment a hook receives (issue #12): always
+/// `WORKZ_BRANCH`, `WORKZ_SLUG`, `WORKZ_WORKTREE`, `WORKZ_REPO`, `WORKZ_ROOT`;
+/// with an allocation also `WORKZ_PORT`, `WORKZ_PORT_END`, `WORKZ_DB_NAME`,
+/// `WORKZ_COMPOSE_PROJECT`. `WORKZ_FRAMEWORK` is only known at post_start time
+/// (it comes from the sync step), so `pre_done` passes `None` and omits it.
+/// Pure — unit-testable.
+fn hook_env_vars(
     root: &Path,
     wt_path: &Path,
     branch: &str,
     framework: Option<sync::Framework>,
-    iso: Option<&isolation::IsolationConfig>,
-) {
-    command
-        .env("WORKZ_BRANCH", branch)
-        .env("WORKZ_SLUG", isolation::branch_to_slug(branch))
-        .env("WORKZ_WORKTREE", wt_path)
-        .env("WORKZ_REPO", git::repo_name(root))
-        .env("WORKZ_ROOT", root);
-
+    alloc: Option<&HookAllocation>,
+) -> Vec<(String, String)> {
+    let mut vars = vec![
+        ("WORKZ_BRANCH".to_string(), branch.to_string()),
+        ("WORKZ_SLUG".to_string(), isolation::branch_to_slug(branch)),
+        (
+            "WORKZ_WORKTREE".to_string(),
+            wt_path.to_string_lossy().to_string(),
+        ),
+        ("WORKZ_REPO".to_string(), git::repo_name(root)),
+        ("WORKZ_ROOT".to_string(), root.to_string_lossy().to_string()),
+    ];
     if let Some(framework) = framework {
-        command.env("WORKZ_FRAMEWORK", format!("{framework:?}").to_lowercase());
+        vars.push((
+            "WORKZ_FRAMEWORK".to_string(),
+            format!("{framework:?}").to_lowercase(),
+        ));
     }
-
-    if let Some(iso) = iso {
-        command
-            .env("WORKZ_PORT", iso.port.to_string())
-            .env("WORKZ_PORT_END", iso.port_end.to_string())
-            .env("WORKZ_DB_NAME", &iso.db_name)
-            .env("WORKZ_COMPOSE_PROJECT", &iso.compose_project);
+    if let Some(alloc) = alloc {
+        vars.push(("WORKZ_PORT".to_string(), alloc.port.to_string()));
+        vars.push(("WORKZ_PORT_END".to_string(), alloc.port_end.to_string()));
+        vars.push(("WORKZ_DB_NAME".to_string(), alloc.db_name.clone()));
+        vars.push((
+            "WORKZ_COMPOSE_PROJECT".to_string(),
+            alloc.compose_project.clone(),
+        ));
     }
+    vars
 }
 
-/// Run the configured `post_start` hook once the worktree is fully provisioned,
-/// with the workz context exported via [`export_hook_env`].
-fn run_post_start_hook(
-    hook: &str,
-    root: &Path,
-    wt_path: &Path,
-    branch: &str,
-    framework: sync::Framework,
-    iso: Option<&isolation::IsolationConfig>,
-) -> Result<()> {
-    println!("  running post_start hook...");
+/// Run a configured hook (`post_start` / `pre_done`) in the worktree with the
+/// given environment. A failing hook warns but never aborts the command.
+fn run_hook(label: &str, hook: &str, wt_path: &Path, vars: &[(String, String)]) -> Result<()> {
+    println!("  running {label} hook...");
 
     let mut command = Command::new("sh");
     command.args(["-c", hook]).current_dir(wt_path);
-    export_hook_env(&mut command, root, wt_path, branch, Some(framework), iso);
+    for (key, value) in vars {
+        command.env(key, value);
+    }
 
     let status = command.status()?;
     if !status.success() {
-        eprintln!("  warning: post_start hook exited with {}", status);
+        eprintln!("  warning: {label} hook exited with {status}");
     }
     Ok(())
 }
@@ -682,6 +715,10 @@ fn cmd_done(
         bail!("worktree has uncommitted changes — use --force to remove anyway");
     }
 
+    // Capture the allocation before teardown releases it — the pre_done hook
+    // still gets the allocated WORKZ_* values (issue #12).
+    let alloc = isolation::get_allocation(&branch_name);
+
     // Stop containers if docker-compose exists (skippable via --no-compose-down)
     if !no_compose_down {
         stop_docker(&wt_path, compose_volumes);
@@ -695,11 +732,6 @@ fn cmd_done(
         print_reap_summary(&report);
     }
 
-    // Capture the isolation allocation *before* releasing it, so the pre_done
-    // hook can still read WORKZ_PORT/WORKZ_DB_NAME/etc. for the worktree it's
-    // tearing down (issue #12).
-    let iso = isolation::lookup_isolation(&branch_name);
-
     // Release isolated port allocation (no-op if not isolated)
     let _ = isolation::release_isolation(&branch_name);
 
@@ -707,19 +739,13 @@ fn cmd_done(
         isolation::drop_database(&branch_name);
     }
 
-    // Run pre_done hook if configured. It gets the same WORKZ_* context as
-    // post_start (minus WORKZ_FRAMEWORK — nothing is synced at teardown) so a
-    // hook that created a per-worktree database in post_start can drop it here
-    // by the same name.
+    // Run pre_done hook if configured. It receives the same WORKZ_* context
+    // as post_start (issue #12), except WORKZ_FRAMEWORK — that's only known
+    // after a sync step, which done never runs.
     if let Some(hook) = &config.hooks.pre_done {
-        println!("  running pre_done hook...");
-        let mut command = Command::new("sh");
-        command.args(["-c", hook]).current_dir(&wt_path);
-        export_hook_env(&mut command, &root, &wt_path, &branch_name, None, iso.as_ref());
-        let status = command.status()?;
-        if !status.success() {
-            eprintln!("  warning: pre_done hook exited with {}", status);
-        }
+        let hook_alloc = alloc.as_ref().map(HookAllocation::from);
+        let vars = hook_env_vars(&root, &wt_path, &branch_name, None, hook_alloc.as_ref());
+        run_hook("pre_done", hook, &wt_path, &vars)?;
     }
 
     println!("removing worktree at {}", wt_path.display());
@@ -1476,5 +1502,69 @@ mod tests {
             assert!(!wrapper.contains("$(command workz"));
             assert!(!wrapper.contains("(command workz $argv 2>&1)"));
         }
+    }
+
+    fn var<'a>(vars: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        vars.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    fn sample_hook_allocation() -> HookAllocation {
+        HookAllocation {
+            port: 3010,
+            port_end: 3019,
+            db_name: "feat_x".into(),
+            compose_project: "feat_x".into(),
+        }
+    }
+
+    #[test]
+    fn hook_env_vars_without_allocation_has_base_context_only() {
+        let vars = hook_env_vars(
+            Path::new("/repo"),
+            Path::new("/repo--feat-x"),
+            "feat/x",
+            None,
+            None,
+        );
+        assert_eq!(var(&vars, "WORKZ_BRANCH"), Some("feat/x"));
+        assert_eq!(var(&vars, "WORKZ_SLUG"), Some("feat_x"));
+        assert_eq!(var(&vars, "WORKZ_WORKTREE"), Some("/repo--feat-x"));
+        assert_eq!(var(&vars, "WORKZ_ROOT"), Some("/repo"));
+        assert!(var(&vars, "WORKZ_PORT").is_none());
+        assert!(var(&vars, "WORKZ_DB_NAME").is_none());
+        // pre_done passes framework = None → no WORKZ_FRAMEWORK.
+        assert!(var(&vars, "WORKZ_FRAMEWORK").is_none());
+    }
+
+    #[test]
+    fn hook_env_vars_with_allocation_exports_isolation_values() {
+        let alloc = sample_hook_allocation();
+        let vars = hook_env_vars(
+            Path::new("/repo"),
+            Path::new("/repo--feat-x"),
+            "feat/x",
+            Some(sync::Framework::Vite),
+            Some(&alloc),
+        );
+        assert_eq!(var(&vars, "WORKZ_PORT"), Some("3010"));
+        assert_eq!(var(&vars, "WORKZ_PORT_END"), Some("3019"));
+        assert_eq!(var(&vars, "WORKZ_DB_NAME"), Some("feat_x"));
+        assert_eq!(var(&vars, "WORKZ_COMPOSE_PROJECT"), Some("feat_x"));
+        assert_eq!(var(&vars, "WORKZ_FRAMEWORK"), Some("vite"));
+    }
+
+    #[test]
+    fn hook_allocation_from_port_allocation_computes_range_end() {
+        let alloc = isolation::PortAllocation {
+            port: 3020,
+            port_count: 10,
+            branch: "feat/y".into(),
+            db_name: "feat_y".into(),
+            compose_project: "feat_y".into(),
+            worktree_path: "/tmp/y".into(),
+            allocated_at: "2024-01-01T00:00:00Z".into(),
+        };
+        let hook_alloc = HookAllocation::from(&alloc);
+        assert_eq!(hook_alloc.port_end, 3029);
     }
 }
