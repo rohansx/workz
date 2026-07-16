@@ -18,10 +18,6 @@
 <img width="720" height="405" alt="workz-explainer-under5MB" src="https://github.com/user-attachments/assets/504b2e0d-d62e-4b71-b22f-31b0998806fe" />
 </p>
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/rohansx/workz/main/demo.gif" alt="workz demo" width="820">
-</p>
-
 ---
 
 ## Why
@@ -50,6 +46,12 @@ workz start feature/checkout --isolated
 ```
 
 That's it: `node_modules` symlinked, `.env` copied, `PORT=3000-3009`, `DB_NAME` and `COMPOSE_PROJECT_NAME` set — you're dropped into a worktree you can `dev` immediately, with no collisions against your other worktrees.
+
+## See it in action
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/rohansx/workz/main/demo.gif" alt="workz demo" width="820">
+</p>
 
 ## Use it as a hook
 
