@@ -19,6 +19,37 @@ use std::process::Command;
 /// Sentinel prefix for shell integration — the wrapper function parses this to cd.
 const CD_PREFIX: &str = "__workz_cd:";
 
+/// Tell the shell wrapper where to `cd` after workz exits.
+///
+/// The wrapper sets `WORKZ_CD_FILE` to a scratch file and runs workz with its
+/// stdio attached straight to the terminal — no output capture. We write the
+/// target there. That's what lets `--ai` hand an interactive agent the real
+/// terminal by plain inheritance: the old wrapper captured stdout to scan for
+/// the `__workz_cd:` line, which forced us to feed agents a `/dev/tty` fd that
+/// Bun (Claude Code) can't build a `WriteStream` over on macOS — the kqueue
+/// crash in issue #11.
+///
+/// When `WORKZ_CD_FILE` is unset (workz run without the wrapper, or an older
+/// wrapper that still captures stdout), fall back to printing the sentinel so
+/// the directory change keeps working.
+fn emit_cd(target: impl std::fmt::Display) {
+    emit_cd_to(std::env::var("WORKZ_CD_FILE").ok().as_deref(), target);
+}
+
+/// Core of [`emit_cd`], split out so the file/sentinel decision is testable
+/// without touching the process environment. Writes `target` to `cd_file` when
+/// one is given and non-empty; otherwise (or if the write fails) prints the
+/// `__workz_cd:` sentinel.
+fn emit_cd_to(cd_file: Option<&str>, target: impl std::fmt::Display) {
+    let target = target.to_string();
+    if let Some(cd_file) = cd_file {
+        if !cd_file.is_empty() && std::fs::write(cd_file, format!("{target}\n")).is_ok() {
+            return;
+        }
+    }
+    println!("{CD_PREFIX}{target}");
+}
+
 fn main() -> Result<()> {
     let cli = cli::Cli::parse();
 
@@ -153,7 +184,7 @@ fn cmd_start(
 
     if wt_path.exists() {
         println!("worktree already exists at {}", wt_path.display());
-        println!("{}{}", CD_PREFIX, wt_path.display());
+        emit_cd(wt_path.display());
         return Ok(());
     }
 
@@ -265,17 +296,49 @@ fn cmd_start(
     }
 
     println!("ready!");
-    println!("{}{}", CD_PREFIX, wt_path.display());
+    emit_cd(wt_path.display());
     Ok(())
 }
 
-/// Run the configured `post_start` hook with the workz context exported as
-/// environment variables. The hook always sees `WORKZ_BRANCH`, `WORKZ_SLUG`,
-/// `WORKZ_WORKTREE`, `WORKZ_REPO`, `WORKZ_ROOT`, and `WORKZ_FRAMEWORK`; when the
-/// worktree was created `--isolated`, it also sees the allocated `WORKZ_PORT`,
-/// `WORKZ_PORT_END`, `WORKZ_DB_NAME`, and `WORKZ_COMPOSE_PROJECT`. This is what
-/// lets a hook name a per-worktree database without re-deriving the slug from
+/// Export the worktree context onto a hook `command` as environment variables.
+///
+/// The hook always sees `WORKZ_BRANCH`, `WORKZ_SLUG`, `WORKZ_WORKTREE`,
+/// `WORKZ_REPO`, and `WORKZ_ROOT`. `WORKZ_FRAMEWORK` is set only when a
+/// `framework` is known (it isn't at teardown, where nothing is synced). When
+/// the worktree was `--isolated`, the allocated `WORKZ_PORT`, `WORKZ_PORT_END`,
+/// `WORKZ_DB_NAME`, and `WORKZ_COMPOSE_PROJECT` are added too. This is what lets
+/// a hook name a per-worktree database without re-deriving the slug from
 /// `git branch` (issue #12).
+fn export_hook_env(
+    command: &mut Command,
+    root: &Path,
+    wt_path: &Path,
+    branch: &str,
+    framework: Option<sync::Framework>,
+    iso: Option<&isolation::IsolationConfig>,
+) {
+    command
+        .env("WORKZ_BRANCH", branch)
+        .env("WORKZ_SLUG", isolation::branch_to_slug(branch))
+        .env("WORKZ_WORKTREE", wt_path)
+        .env("WORKZ_REPO", git::repo_name(root))
+        .env("WORKZ_ROOT", root);
+
+    if let Some(framework) = framework {
+        command.env("WORKZ_FRAMEWORK", format!("{framework:?}").to_lowercase());
+    }
+
+    if let Some(iso) = iso {
+        command
+            .env("WORKZ_PORT", iso.port.to_string())
+            .env("WORKZ_PORT_END", iso.port_end.to_string())
+            .env("WORKZ_DB_NAME", &iso.db_name)
+            .env("WORKZ_COMPOSE_PROJECT", &iso.compose_project);
+    }
+}
+
+/// Run the configured `post_start` hook once the worktree is fully provisioned,
+/// with the workz context exported via [`export_hook_env`].
 fn run_post_start_hook(
     hook: &str,
     root: &Path,
@@ -287,23 +350,8 @@ fn run_post_start_hook(
     println!("  running post_start hook...");
 
     let mut command = Command::new("sh");
-    command
-        .args(["-c", hook])
-        .current_dir(wt_path)
-        .env("WORKZ_BRANCH", branch)
-        .env("WORKZ_SLUG", isolation::branch_to_slug(branch))
-        .env("WORKZ_WORKTREE", wt_path)
-        .env("WORKZ_REPO", git::repo_name(root))
-        .env("WORKZ_ROOT", root)
-        .env("WORKZ_FRAMEWORK", format!("{framework:?}").to_lowercase());
-
-    if let Some(iso) = iso {
-        command
-            .env("WORKZ_PORT", iso.port.to_string())
-            .env("WORKZ_PORT_END", iso.port_end.to_string())
-            .env("WORKZ_DB_NAME", &iso.db_name)
-            .env("WORKZ_COMPOSE_PROJECT", &iso.compose_project);
-    }
+    command.args(["-c", hook]).current_dir(wt_path);
+    export_hook_env(&mut command, root, wt_path, branch, Some(framework), iso);
 
     let status = command.status()?;
     if !status.success() {
@@ -340,41 +388,23 @@ fn launch_ai_tool(tool: &AiTool, path: &std::path::Path) -> Result<()> {
     command.args(&args).current_dir(path);
 
     if interactive {
-        // The shell wrapper runs `workz` inside a command substitution
-        // (`result=$(command workz "$@" 2>&1)`), so our stdout/stderr are a
-        // captured pipe, not the terminal. Handing an interactive TUI that pipe
-        // corrupts the display — its cursor/query escape sequences get replayed
-        // as shell commands (the `fish: Unknown command` spew in issue #11).
-        // Wire the child straight to the controlling terminal instead, and wait
-        // for it so the `cd` sentinel is emitted only after the session ends.
-        match tty_stdio() {
-            Some((stdin, stdout, stderr)) => {
-                command.stdin(stdin).stdout(stdout).stderr(stderr);
-                command.status()?;
-            }
-            None => {
-                // No controlling terminal (e.g. launched from a script) —
-                // fall back to inheriting whatever fds we have.
-                command.spawn()?;
-            }
-        }
+        // Interactive agents inherit workz's own stdio, which is the terminal:
+        // the shell wrapper runs workz *without* capturing its output (it reads
+        // the target directory from `WORKZ_CD_FILE` instead), so fds 0/1/2 are
+        // the real tty. We wait for the agent to exit before returning so the
+        // `cd` is applied only after the session ends.
+        //
+        // The earlier fix handed the child a freshly-opened `/dev/tty` instead;
+        // that broke Claude Code on macOS, where Bun can't build a `WriteStream`
+        // over that fd (`EINVAL: kqueue`, `process.stdout.isTTY` undefined —
+        // issue #11). Plain inheritance avoids the whole problem.
+        command.status()?;
     } else {
         // GUI editors detach on their own; a background spawn is correct.
         command.spawn()?;
     }
 
     Ok(())
-}
-
-/// Open the controlling terminal (`/dev/tty`) as stdio for an interactive child,
-/// bypassing the shell wrapper's captured pipe. Returns `None` when there is no
-/// controlling terminal, so the caller can fall back to inheriting fds.
-fn tty_stdio() -> Option<(std::process::Stdio, std::process::Stdio, std::process::Stdio)> {
-    use std::fs::OpenOptions;
-    let stdin = OpenOptions::new().read(true).open("/dev/tty").ok()?;
-    let stdout = OpenOptions::new().write(true).open("/dev/tty").ok()?;
-    let stderr = OpenOptions::new().write(true).open("/dev/tty").ok()?;
-    Some((stdin.into(), stdout.into(), stderr.into()))
 }
 
 fn launch_docker(path: &std::path::Path) -> Result<()> {
@@ -540,7 +570,7 @@ fn cmd_switch(query: Option<&str>) -> Result<()> {
     }
 
     if candidates.len() == 1 {
-        println!("{}{}", CD_PREFIX, candidates[0].path.display());
+        emit_cd(candidates[0].path.display());
         return Ok(());
     }
 
@@ -549,7 +579,7 @@ fn cmd_switch(query: Option<&str>) -> Result<()> {
     // substring match.
     if let Some(q) = query {
         if let Some(w) = candidates.iter().find(|w| w.branch == q) {
-            println!("{}{}", CD_PREFIX, w.path.display());
+            emit_cd(w.path.display());
             return Ok(());
         }
         let subs: Vec<_> = candidates
@@ -557,7 +587,7 @@ fn cmd_switch(query: Option<&str>) -> Result<()> {
             .filter(|w| w.branch.contains(q) || w.path.to_string_lossy().contains(q))
             .collect();
         if subs.len() == 1 {
-            println!("{}{}", CD_PREFIX, subs[0].path.display());
+            emit_cd(subs[0].path.display());
             return Ok(());
         }
     }
@@ -610,7 +640,7 @@ fn cmd_switch(query: Option<&str>) -> Result<()> {
         .unwrap_or(&selected)
         .trim();
 
-    println!("{}{}", CD_PREFIX, path);
+    emit_cd(path);
     Ok(())
 }
 
@@ -665,6 +695,11 @@ fn cmd_done(
         print_reap_summary(&report);
     }
 
+    // Capture the isolation allocation *before* releasing it, so the pre_done
+    // hook can still read WORKZ_PORT/WORKZ_DB_NAME/etc. for the worktree it's
+    // tearing down (issue #12).
+    let iso = isolation::lookup_isolation(&branch_name);
+
     // Release isolated port allocation (no-op if not isolated)
     let _ = isolation::release_isolation(&branch_name);
 
@@ -672,13 +707,16 @@ fn cmd_done(
         isolation::drop_database(&branch_name);
     }
 
-    // Run pre_done hook if configured
+    // Run pre_done hook if configured. It gets the same WORKZ_* context as
+    // post_start (minus WORKZ_FRAMEWORK — nothing is synced at teardown) so a
+    // hook that created a per-worktree database in post_start can drop it here
+    // by the same name.
     if let Some(hook) = &config.hooks.pre_done {
         println!("  running pre_done hook...");
-        let status = Command::new("sh")
-            .args(["-c", hook])
-            .current_dir(&wt_path)
-            .status()?;
+        let mut command = Command::new("sh");
+        command.args(["-c", hook]).current_dir(&wt_path);
+        export_hook_env(&mut command, &root, &wt_path, &branch_name, None, iso.as_ref());
+        let status = command.status()?;
         if !status.success() {
             eprintln!("  warning: pre_done hook exited with {}", status);
         }
@@ -1191,22 +1229,23 @@ const SHELL_INIT_BASH: &str = r#"# workz shell integration
 #   eval "$(workz shell-init zsh)"
 
 workz() {
-    local result
-    result=$(command workz "$@" 2>&1)
-    local exit_code=$?
+    # workz writes the directory to cd into (if any) to this scratch file, and
+    # runs attached straight to the terminal — no output capture. That's what
+    # lets `workz start --ai` hand an interactive agent the real tty. (Capturing
+    # stdout, as this wrapper used to, forced workz to feed agents a /dev/tty fd
+    # that broke Claude Code on macOS.)
+    local cd_file exit_code cd_target
+    cd_file=$(mktemp "${TMPDIR:-/tmp}/workz_cd.XXXXXX" 2>/dev/null)
 
-    local has_cd=false
-    local cd_target=""
-    while IFS= read -r line; do
-        if [[ "$line" == __workz_cd:* ]]; then
-            has_cd=true
-            cd_target="${line#__workz_cd:}"
-        else
-            printf '%s\n' "$line"
-        fi
-    done <<< "$result"
+    WORKZ_CD_FILE="$cd_file" command workz "$@"
+    exit_code=$?
 
-    if [[ "$has_cd" == true ]]; then
+    if [[ -n "$cd_file" ]]; then
+        [[ -s "$cd_file" ]] && IFS= read -r cd_target < "$cd_file"
+        rm -f "$cd_file"
+    fi
+
+    if [[ -n "$cd_target" ]]; then
         builtin cd "$cd_target" || return
     fi
 
@@ -1339,16 +1378,21 @@ const SHELL_INIT_FISH: &str = r#"# workz shell integration
 #   workz shell-init fish | source
 
 function workz
-    set -l result (command workz $argv 2>&1)
+    # workz writes the directory to cd into (if any) to this scratch file, and
+    # runs attached straight to the terminal — no output capture. That's what
+    # lets `workz start --ai` hand an interactive agent the real tty. (Capturing
+    # stdout, as this wrapper used to, forced workz to feed agents a /dev/tty fd
+    # that broke Claude Code on macOS.)
+    set -l cd_file (mktemp (test -n "$TMPDIR"; and echo $TMPDIR; or echo /tmp)/workz_cd.XXXXXX)
+
+    WORKZ_CD_FILE=$cd_file command workz $argv
     set -l exit_code $status
 
-    for line in $result
-        if string match -q '__workz_cd:*' $line
-            set -l target (string replace '__workz_cd:' '' $line)
-            builtin cd $target
-        else
-            echo $line
+    if test -n "$cd_file"
+        if test -s "$cd_file"
+            builtin cd (cat $cd_file)
         end
+        rm -f $cd_file
     end
 
     return $exit_code
@@ -1397,3 +1441,40 @@ complete -c workz -n "__fish_seen_subcommand_from clean" -l merged -d "Remove wo
 complete -c workz -n "__fish_seen_subcommand_from clean" -l base -d "Base branch to check merged against"
 complete -c workz -n "__fish_seen_subcommand_from shell-init init" -a "zsh bash fish"
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emit_cd_writes_target_to_cd_file() {
+        // When WORKZ_CD_FILE points somewhere, the target lands there (with a
+        // trailing newline) and nothing is printed for the shell to scrape.
+        let path = std::env::temp_dir().join("workz_emit_cd_test_file");
+        let _ = std::fs::remove_file(&path);
+        emit_cd_to(Some(path.to_str().unwrap()), "/some/worktree");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "/some/worktree\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn emit_cd_empty_cd_file_does_not_write() {
+        // An empty WORKZ_CD_FILE means "no file" — fall back to the sentinel
+        // (printed to stdout) rather than writing to a path named "".
+        emit_cd_to(Some(""), "/x");
+        assert!(!Path::new("").exists());
+    }
+
+    #[test]
+    fn shell_wrappers_use_cd_file_not_stdout_capture() {
+        // Regression guard for issue #11: the wrappers must run workz attached
+        // to the terminal (via WORKZ_CD_FILE), not capture its stdout — capture
+        // is what forced the /dev/tty fd that broke Claude Code on macOS.
+        for wrapper in [SHELL_INIT_BASH, SHELL_INIT_FISH] {
+            assert!(wrapper.contains("WORKZ_CD_FILE"));
+            assert!(!wrapper.contains("$(command workz"));
+            assert!(!wrapper.contains("(command workz $argv 2>&1)"));
+        }
+    }
+}
