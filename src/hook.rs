@@ -41,13 +41,37 @@ pub fn recipe(host: HookHost) -> Recipe {
             note: None,
         },
         HookHost::Claude => Recipe {
-            snippet: format!(
-                "{{\n  \"hooks\": {{\n    \"WorktreeCreate\": [\n      {{ \"hooks\": [ {{ \"type\": \"command\", \"command\": \"{CMD}\" }} ] }}\n    ]\n  }}\n}}\n"
-            ),
-            target_file: ".claude/settings.json".to_string(),
+            // Claude Code's WorktreeCreate hook REPLACES worktree creation: it runs in
+            // the main checkout, receives {"name": "..."} on stdin, and must create the
+            // worktree and print its path as the ONLY stdout. So it must be
+            // `workz start`-shaped, not `workz sync`-shaped — running `workz sync` here
+            // creates no worktree and, with an empty path, corrupts the main checkout
+            // (issue #18). This interim bridge implements the contract; a native
+            // `workz claude-hook` subcommand is tracked in #19.
+            snippet: r##"# 1. Save as .claude/hooks/workz-worktree-create.sh, then `chmod +x` it (needs jq):
+#!/bin/sh
+set -eu
+name=$(jq -r .name)                                  # WorktreeCreate stdin payload has only `name`
+out=$(workz start "$name" --isolated 2>&1) || { printf '%s\n' "$out" >&2; exit 1; }
+printf '%s\n' "$out" >&2                             # progress must NOT touch stdout
+printf '%s\n' "$out" | sed -n 's/^__workz_cd://p' | tail -n1   # print ONLY the worktree path
+
+# 2. Point .claude/settings.json at it:
+{
+  "hooks": {
+    "WorktreeCreate": [
+      { "hooks": [ { "type": "command", "command": ".claude/hooks/workz-worktree-create.sh" } ] }
+    ]
+  }
+}
+"##
+            .to_string(),
+            target_file: ".claude/settings.json + .claude/hooks/workz-worktree-create.sh".to_string(),
             installable: None,
             note: Some(
-                "Claude Code runs WorktreeCreate hooks in the new worktree. Merge this into your existing settings.json rather than replacing it."
+                "WorktreeCreate runs in the MAIN checkout and must create the worktree itself \
+                 and print its path — do not use `workz sync` here. Interim recipe (requires jq); \
+                 a native `workz claude-hook` that drops the shell/jq bridge is tracked in #19."
                     .to_string(),
             ),
         },
@@ -130,10 +154,11 @@ mod tests {
         ] {
             let r = recipe(host);
             assert!(!r.snippet.is_empty());
-            // Cursor uses a JSON array ["workz","sync",…], so check the tokens
-            // rather than the joined string.
+            // Every recipe invokes workz. Most hosts run `workz sync` in an
+            // already-created worktree; Claude's WorktreeCreate must instead
+            // `workz start` (it creates the worktree), so accept either verb.
             assert!(
-                r.snippet.contains("workz") && r.snippet.contains("sync"),
+                r.snippet.contains("workz") && r.snippet.contains("--isolated"),
                 "host snippet missing command: {}",
                 r.snippet
             );
@@ -152,8 +177,25 @@ mod tests {
     }
 
     #[test]
-    fn claude_snippet_is_valid_json() {
+    fn claude_recipe_creates_a_worktree_not_sync() {
+        // Regression for #18: Claude Code's WorktreeCreate hook *replaces* worktree
+        // creation, so the recipe must be `workz start`-shaped (create + print path).
+        // `workz sync` creates no worktree and, with an empty path, corrupts the main
+        // checkout — it must never appear in this recipe.
         let r = recipe(HookHost::Claude);
-        let _: serde_json::Value = serde_json::from_str(&r.snippet).unwrap();
+        assert!(
+            r.snippet.contains("workz start"),
+            "Claude WorktreeCreate recipe must create a worktree"
+        );
+        assert!(
+            !r.snippet.contains("workz sync"),
+            "Claude WorktreeCreate recipe must not use `workz sync`"
+        );
+        assert!(r.snippet.contains("WorktreeCreate"));
+        // The embedded settings.json block (after the "# 2." marker) must be valid JSON.
+        let after = r.snippet.split("# 2.").nth(1).expect("recipe has a settings.json block");
+        let json = after[after.find('{').unwrap()..].trim();
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert!(v.get("hooks").is_some());
     }
 }
