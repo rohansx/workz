@@ -977,6 +977,17 @@ fn cmd_sync(
 ) -> Result<()> {
     let root = git::repo_root()?;
     let target = match path {
+        // An explicit but empty path (e.g. a hook that passed an unset
+        // `$WORKTREE_PATH`) must not silently fall through to the cwd — that let
+        // `workz sync --isolated ""` provision the *main* checkout, writing a
+        // managed `.env.local` and allocating a port there (issue #18).
+        Some(p) if p.as_os_str().is_empty() => {
+            bail!(
+                "empty worktree path — pass a real worktree path. If this came from a \
+                 Claude Code WorktreeCreate hook, that hook must create the worktree and \
+                 print its path (run `workz hook claude` for the correct recipe)."
+            );
+        }
         Some(p) => p.to_path_buf(),
         None => std::env::current_dir()?,
     };

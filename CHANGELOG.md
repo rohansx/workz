@@ -26,6 +26,17 @@ All notable changes to workz are documented here. This project adheres to
 
 ### Fixed
 
+- **`workz hook claude` now emits a recipe that actually works.** Claude Code's
+  `WorktreeCreate` hook *replaces* worktree creation — it runs in the main
+  checkout, receives `{name}` on stdin, and must create the worktree and print
+  its path as the only stdout. The old recipe ran `workz sync` (which provisions
+  an *existing* directory, so no worktree was ever created) and the README
+  variant passed `"$WORKTREE_PATH"`, which expands empty and made
+  `workz sync --isolated ""` write a managed `.env.local` into the main checkout.
+  The recipe is now a `workz start`-shaped create-and-print-path bridge, and
+  `workz sync` rejects an empty-string path instead of falling through to the
+  cwd. A native `workz claude-hook` subcommand is tracked in #19. (#18)
+
 - **`workz start <branch> --ai` no longer corrupts the terminal.** Two stacked
   bugs: workz passed `--worktree` to Claude Code (making it create a *nested*
   worktree), and the shell wrapper captured workz's stdout, so an interactive
