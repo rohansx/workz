@@ -217,7 +217,7 @@ The leaf directory is the branch name with `/` and `\` replaced by `-`.
 
 ### Hook environment
 
-`post_start` runs after the worktree is fully provisioned — dependencies synced and, with `--isolated`, `.env.local` written — so it can read the managed vars. workz also exports the worktree context so a hook doesn't have to re-derive it:
+`post_start` runs after the worktree is fully provisioned — dependencies synced and, with `--isolated`, `.env.local` written — so it can read the managed vars. `pre_done` runs before the worktree is removed and receives the same variables (except `WORKZ_FRAMEWORK`, which is only known after a sync step). workz exports the worktree context so a hook doesn't have to re-derive it:
 
 | Variable | Meaning |
 |----------|---------|

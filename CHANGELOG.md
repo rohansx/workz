@@ -23,6 +23,14 @@ All notable changes to workz are documented here. This project adheres to
 
 ### Fixed
 
+- **`pre_done` hook environment.** The `pre_done` hook now receives the same
+  `WORKZ_*` variables as `post_start` (it previously ran with no workz context
+  at all): `WORKZ_BRANCH`, `WORKZ_SLUG`, `WORKZ_WORKTREE`, `WORKZ_REPO`,
+  `WORKZ_ROOT`, plus the allocated
+  `WORKZ_PORT`/`WORKZ_PORT_END`/`WORKZ_DB_NAME`/`WORKZ_COMPOSE_PROJECT` when
+  the worktree was isolated. `WORKZ_FRAMEWORK` is omitted — it's only known
+  after a sync step, which `done` never runs. (#12)
+
 - **`workz start <branch> --ai` no longer corrupts the terminal.** workz was
   passing `--worktree` to Claude Code, which made it create a *nested*
   worktree; combined with launching the TUI on the shell wrapper's captured
