@@ -15,6 +15,10 @@
 </p>
 
 <p align="center">
+<img width="720" height="405" alt="workz-explainer-under5MB" src="https://github.com/user-attachments/assets/504b2e0d-d62e-4b71-b22f-31b0998806fe" />
+</p>
+
+<p align="center">
   <img src="https://raw.githubusercontent.com/rohansx/workz/main/demo.gif" alt="workz demo" width="820">
 </p>
 
