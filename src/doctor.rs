@@ -9,7 +9,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::{git, isolation};
+use crate::{config, git, isolation};
 
 /// How old a `.git/index.lock` must be before we call it stale. Real git
 /// operations rarely hold it past a few seconds; 60s is the standard
@@ -74,15 +74,18 @@ fn diagnose(fix: bool) -> Result<(Vec<String>, bool)> {
 fn check_config(root: &Path, out: &mut Vec<String>) -> u32 {
     let mut problems = 0;
 
+    // Deserialize into the real `Config`, not just `toml::Value`: a value error
+    // (typo'd strategy, wrong type) is valid TOML but makes `load_config` discard
+    // the whole file, so a syntax-only check reported "[ok]" on exactly the files
+    // that were being silently ignored (#21).
+    let parses = |c: &str| toml::from_str::<config::Config>(c).map_err(|e| e.to_string());
+
     let project = root.join(".workz.toml");
     if project.exists() {
-        match std::fs::read_to_string(&project)
-            .map_err(|e| e.to_string())
-            .and_then(|c| toml::from_str::<toml::Value>(&c).map_err(|e| e.to_string()))
-        {
+        match std::fs::read_to_string(&project).map_err(|e| e.to_string()).and_then(|c| parses(&c)) {
             Ok(_) => out.push("[ok] .workz.toml parses".to_string()),
             Err(e) => {
-                out.push(format!("[fail] .workz.toml does not parse: {e}"));
+                out.push(format!("[fail] .workz.toml is invalid: {e}"));
                 problems += 1;
             }
         }
@@ -92,13 +95,10 @@ fn check_config(root: &Path, out: &mut Vec<String>) -> u32 {
 
     if let Some(global) = dirs::config_dir().map(|d| d.join("workz").join("config.toml")) {
         if global.exists() {
-            match std::fs::read_to_string(&global)
-                .map_err(|e| e.to_string())
-                .and_then(|c| toml::from_str::<toml::Value>(&c).map_err(|e| e.to_string()))
-            {
+            match std::fs::read_to_string(&global).map_err(|e| e.to_string()).and_then(|c| parses(&c)) {
                 Ok(_) => out.push("[ok] global config parses".to_string()),
                 Err(e) => {
-                    out.push(format!("[fail] global config does not parse: {e}"));
+                    out.push(format!("[fail] global config is invalid: {e}"));
                     problems += 1;
                 }
             }

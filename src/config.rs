@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -290,34 +290,48 @@ fn default_copy_patterns() -> Vec<String> {
 /// Load config: global (~/.config/workz/config.toml) merged with project (.workz.toml).
 /// Project config takes priority over global config.
 pub fn load_config(repo_root: &Path) -> Result<Config> {
-    let global = load_global_config();
-    let project = load_project_config(repo_root);
+    let global = load_global_config()?;
+    let project = load_project_config(repo_root)?;
 
-    match (global, project) {
-        (Some(g), Some(p)) => Ok(merge_configs(g, p)),
-        (None, Some(p)) => Ok(p),
-        (Some(g), None) => Ok(g),
-        (None, None) => Ok(Config::default()),
-    }
+    Ok(match (global, project) {
+        (Some(g), Some(p)) => merge_configs(g, p),
+        (None, Some(p)) => p,
+        (Some(g), None) => g,
+        (None, None) => Config::default(),
+    })
 }
 
-fn load_global_config() -> Option<Config> {
-    let config_dir = dirs::config_dir()?;
+/// Read + parse a config file. `Ok(None)` = the file doesn't exist; `Err` = it
+/// exists but couldn't be read or deserialized into [`Config`].
+///
+/// A parse error is propagated rather than swallowed: previously a single
+/// invalid value (a typo'd strategy, a wrong type) made `toml::from_str(..).ok()`
+/// return `None`, silently discarding the *entire* config — hooks stopped
+/// running and overrides were ignored with no output at all (#21). Config is
+/// user intent; failing loudly with the offending key beats running with
+/// silently different behavior.
+fn load_config_file(path: &Path, label: &str) -> Result<Option<Config>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents =
+        std::fs::read_to_string(path).with_context(|| format!("reading {label} ({})", path.display()))?;
+    let config = toml::from_str(&contents)
+        .with_context(|| format!("parsing {label} ({}) — fix the reported key or remove it", path.display()))?;
+    Ok(Some(config))
+}
+
+fn load_global_config() -> Result<Option<Config>> {
+    let Some(config_dir) = dirs::config_dir() else {
+        return Ok(None);
+    };
     let path = config_dir.join("workz").join("config.toml");
-    if !path.exists() {
-        return None;
-    }
-    let contents = std::fs::read_to_string(&path).ok()?;
-    toml::from_str(&contents).ok()
+    load_config_file(&path, "global config")
 }
 
-fn load_project_config(repo_root: &Path) -> Option<Config> {
+fn load_project_config(repo_root: &Path) -> Result<Option<Config>> {
     let path = repo_root.join(CONFIG_FILE);
-    if !path.exists() {
-        return None;
-    }
-    let contents = std::fs::read_to_string(&path).ok()?;
-    toml::from_str(&contents).ok()
+    load_config_file(&path, ".workz.toml")
 }
 
 /// Merge two configs. For base lists, project replaces global when set (`.or`);
@@ -373,6 +387,34 @@ mod tests {
 
     fn sync_from(toml_str: &str) -> SyncConfig {
         toml::from_str::<Config>(toml_str).unwrap().sync
+    }
+
+    #[test]
+    fn invalid_config_value_is_an_error_not_silently_dropped() {
+        // Regression for #21: a value error (valid TOML, wrong type) must
+        // surface, not make the whole file vanish into defaults.
+        let dir = std::env::temp_dir().join(format!("workz_cfg21_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILE);
+
+        // Missing file → Ok(None).
+        assert!(load_config_file(&path, "test").unwrap().is_none());
+
+        // Invalid value → Err (not Ok(None)).
+        std::fs::write(&path, "[isolation]\nport_range_size = \"nope\"\n").unwrap();
+        let err = load_config_file(&path, "test").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("port_range_size") || format!("{err:#}").contains("u16"),
+            "error should name the offending key/type, got: {err:#}"
+        );
+
+        // Valid file → Ok(Some) with the value applied.
+        std::fs::write(&path, "[isolation]\nport_range_size = 20\n").unwrap();
+        let cfg = load_config_file(&path, "test").unwrap().unwrap();
+        assert_eq!(cfg.isolation.port_range_size, 20);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

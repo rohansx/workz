@@ -172,6 +172,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
                     branch,
                     &wt_path,
                     config.isolation.port_range_size,
+                    config.isolation.base_port,
                     framework,
                     &config.isolation.services,
                 )?;
@@ -248,6 +249,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
                     &branch,
                     &path,
                     config.isolation.port_range_size,
+                    config.isolation.base_port,
                     report.framework,
                     &config.isolation.services,
                 )?)

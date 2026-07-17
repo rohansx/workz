@@ -214,12 +214,20 @@ pub fn default_branch() -> String {
     "HEAD".to_string()
 }
 
-/// Return a set of branch names that are fully merged into `base`.
-pub fn merged_branches(base: &str) -> Result<Vec<String>> {
-    let output = git(&["branch", "--merged", base])?;
+/// Return branch names fully merged into `base`, looked up in `dir`.
+///
+/// Uses `--format=%(refname:short)` rather than scraping `git branch`'s
+/// human output: a branch checked out in a linked worktree is prefixed with
+/// `+ ` (git ≥ 2.23), and the current branch with `* `. `workz clean --merged`
+/// only ever cares about *worktree* branches — which are by definition checked
+/// out — so the old `.trim_start_matches("* ")` parse left every candidate as
+/// `+ feature-x`, matched nothing, and the command was a silent no-op (#22).
+/// `--format` emits bare names with no prefix and no detached-HEAD line.
+pub fn merged_branches(dir: &Path, base: &str) -> Result<Vec<String>> {
+    let output = git_in(dir, &["branch", "--format=%(refname:short)", "--merged", base])?;
     Ok(output
         .lines()
-        .map(|l| l.trim().trim_start_matches("* ").to_string())
+        .map(|l| l.trim().to_string())
         .filter(|b| !b.is_empty() && b != base)
         .collect())
 }
@@ -449,6 +457,51 @@ mod tests {
         let files = modified_files(&dir).unwrap();
         assert_eq!(files, vec!["shared.txt".to_string()], "first char must survive");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merged_branches_finds_worktree_checked_out_branch() {
+        // Regression for #22: `git branch --merged` prefixes a branch checked out
+        // in a linked worktree with `+ `, which the old parse never stripped — so
+        // `clean --merged` (whose targets are ALWAYS worktree branches) matched
+        // nothing. Reproduce the exact scenario: a merged branch in a worktree.
+        let dir = std::env::temp_dir().join(format!("workz_merged_test_{}", std::process::id()));
+        let wt = std::env::temp_dir().join(format!("workz_merged_wt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&wt);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(["-C", dir.to_str().unwrap()])
+                .args(args)
+                .output()
+                .unwrap();
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@t.com"]);
+        run(&["config", "user.name", "t"]);
+        run(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        // A branch, one commit, merged back into main (so it's fully merged).
+        run(&["branch", "feature-merged"]);
+        run(&["checkout", "-q", "feature-merged"]);
+        run(&["commit", "-q", "--allow-empty", "-m", "work"]);
+        run(&["checkout", "-q", "main"]);
+        run(&["merge", "-q", "feature-merged"]);
+        // Check the merged branch out in a linked worktree (what workz does) →
+        // git now marks it `+ feature-merged`.
+        run(&["worktree", "add", "-q", wt.to_str().unwrap(), "feature-merged"]);
+
+        let merged = merged_branches(&dir, "main").unwrap();
+        assert!(
+            merged.contains(&"feature-merged".to_string()),
+            "worktree-checked-out merged branch must be found, got {merged:?}"
+        );
+        // Base itself is never listed as a candidate for removal.
+        assert!(!merged.contains(&"main".to_string()));
+
+        run(&["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&wt);
     }
 }
 
