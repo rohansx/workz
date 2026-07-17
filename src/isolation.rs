@@ -102,15 +102,21 @@ fn port_is_free(port: u16) -> bool {
 /// Allocate a contiguous block of `range_size` ports that doesn't overlap any
 /// existing allocation. Uses the real bind check to also skip ranges whose base
 /// port is currently held by some other (non-workz) process.
-fn next_available_port_range(registry: &PortRegistry, range_size: u16) -> u16 {
-    next_available_port_range_with(registry, range_size, port_is_free)
+fn next_available_port_range(registry: &PortRegistry, range_size: u16, base_port: u16) -> u16 {
+    next_available_port_range_with(registry, range_size, base_port, port_is_free)
 }
 
 /// Core allocator with an injectable "is this port free?" predicate (so the
 /// overlap logic is unit-testable without touching real sockets).
+///
+/// `base_port` is the per-repo `[isolation] base_port` from `.workz.toml`
+/// (its own default is 3000). It takes precedence over the machine-global
+/// `ports.json` base, which takes precedence over the 3000 fallback — so a
+/// project that sets `base_port = 4000` actually allocates from 4000 (#24).
 fn next_available_port_range_with(
     registry: &PortRegistry,
     range_size: u16,
+    base_port: u16,
     is_free: impl Fn(u16) -> bool,
 ) -> u16 {
     let occupied: Vec<(u16, u16)> = registry
@@ -119,7 +125,13 @@ fn next_available_port_range_with(
         .map(|a| (a.port, a.port + a.port_count))
         .collect();
 
-    let base = if registry.base_port == 0 { 3000 } else { registry.base_port };
+    let base = if base_port != 0 {
+        base_port
+    } else if registry.base_port != 0 {
+        registry.base_port
+    } else {
+        3000
+    };
     let mut candidate = base;
 
     // Align to range_size boundaries
@@ -151,6 +163,7 @@ pub fn setup_isolation(
     branch: &str,
     wt_path: &Path,
     range_size: u16,
+    base_port: u16,
     framework: Framework,
     services: &[String],
 ) -> Result<IsolationConfig> {
@@ -160,7 +173,7 @@ pub fn setup_isolation(
     let alloc = if let Some(existing) = registry.allocations.get(&slug) {
         existing.clone()
     } else {
-        let port = next_available_port_range(&registry, range_size);
+        let port = next_available_port_range(&registry, range_size, base_port);
         let alloc = PortAllocation {
             port,
             port_count: range_size,
@@ -959,7 +972,7 @@ mod tests {
     fn range_allocation_no_overlap() {
         let mut registry = PortRegistry { base_port: 3000, allocations: HashMap::new() };
 
-        let port1 = next_available_port_range_with(&registry, 10, |_| true);
+        let port1 = next_available_port_range_with(&registry, 10, 0, |_| true);
         assert_eq!(port1, 3000);
 
         registry.allocations.insert("first".into(), PortAllocation {
@@ -969,8 +982,25 @@ mod tests {
             allocated_at: "2024-01-01T00:00:00Z".into(),
         });
 
-        let port2 = next_available_port_range_with(&registry, 10, |_| true);
+        let port2 = next_available_port_range_with(&registry, 10, 0, |_| true);
         assert_eq!(port2, 3010);
+    }
+
+    #[test]
+    fn config_base_port_overrides_default_and_registry() {
+        // Regression for #24: the per-repo `[isolation] base_port` must actually
+        // drive allocation. Empty registry, base_port=4000 → first range at 4000.
+        let registry = PortRegistry { base_port: 3000, allocations: HashMap::new() };
+        let port = next_available_port_range_with(&registry, 10, 4000, |_| true);
+        assert_eq!(port, 4000, "config base_port must win over the registry/default");
+
+        // base_port=0 means "unset" → fall back to the registry base (then 3000).
+        let port = next_available_port_range_with(&registry, 10, 0, |_| true);
+        assert_eq!(port, 3000);
+
+        // Alignment still applies to the configured base.
+        let port = next_available_port_range_with(&registry, 10, 4005, |_| true);
+        assert_eq!(port, 4010, "configured base is aligned to the range boundary");
     }
 
     #[test]
@@ -983,7 +1013,7 @@ mod tests {
             allocated_at: "2024-01-01T00:00:00Z".into(),
         });
 
-        let port = next_available_port_range_with(&registry, 10, |_| true);
+        let port = next_available_port_range_with(&registry, 10, 0, |_| true);
         assert_eq!(port, 3010);
     }
 
@@ -1004,7 +1034,7 @@ mod tests {
             allocated_at: "2024-01-01T00:00:00Z".into(),
         });
 
-        let port = next_available_port_range_with(&registry, 10, |_| true);
+        let port = next_available_port_range_with(&registry, 10, 0, |_| true);
         assert_eq!(port, 3010);
     }
 
@@ -1012,7 +1042,7 @@ mod tests {
     fn range_allocation_skips_busy_base_port() {
         let registry = PortRegistry { base_port: 3000, allocations: HashMap::new() };
         // Pretend 3000 is bound by another process; 3010 is free.
-        let port = next_available_port_range_with(&registry, 10, |p| p != 3000);
+        let port = next_available_port_range_with(&registry, 10, 0, |p| p != 3000);
         assert_eq!(port, 3010);
     }
 

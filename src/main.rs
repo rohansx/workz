@@ -243,6 +243,7 @@ fn cmd_start(
             branch,
             &wt_path,
             config.isolation.port_range_size,
+            config.isolation.base_port,
             framework,
             &config.isolation.services,
         )?;
@@ -707,11 +708,26 @@ fn cmd_done(
         (cwd, branch_name)
     };
 
-    if !wt_path.exists() {
-        bail!("worktree not found at {}", wt_path.display());
+    let wt_exists = wt_path.exists();
+
+    // If the directory is gone but state for this branch remains — a port
+    // allocation or stale git worktree metadata — complete the teardown from the
+    // registry instead of bailing. Agent hosts (e.g. Claude Code) delete worktree
+    // directories themselves at session end, which would otherwise orphan the
+    // database, ports, branch, and git metadata that `done` refuses to touch (#23).
+    if !wt_exists {
+        let has_alloc = isolation::get_allocation(&branch_name).is_some();
+        let has_meta = git::worktree_list()
+            .map(|wts| wts.iter().any(|w| w.branch == branch_name))
+            .unwrap_or(false);
+        if !has_alloc && !has_meta {
+            bail!("worktree not found at {}", wt_path.display());
+        }
+        println!("worktree directory already gone — completing cleanup from registry");
     }
 
-    if !force && git::is_dirty(&wt_path).unwrap_or(false) {
+    // The dirty check only makes sense when the directory is still there.
+    if wt_exists && !force && git::is_dirty(&wt_path).unwrap_or(false) {
         bail!("worktree has uncommitted changes — use --force to remove anyway");
     }
 
@@ -719,37 +735,50 @@ fn cmd_done(
     // still gets the allocated WORKZ_* values (issue #12).
     let alloc = isolation::get_allocation(&branch_name);
 
-    // Stop containers if docker-compose exists (skippable via --no-compose-down)
-    if !no_compose_down {
+    // Stop containers if docker-compose exists (skippable via --no-compose-down).
+    // Needs the worktree directory, so skip it when the host already removed it.
+    if wt_exists && !no_compose_down {
         stop_docker(&wt_path, compose_volumes);
     }
 
     // Reap processes bound to the worktree's allocated ports (skippable via --no-reap).
-    // The stateful registry makes this precise — we only touch ports workz allocated,
-    // so a dev server on a port we don't own is never touched.
+    // Registry-driven, so it runs whether or not the directory still exists.
     if !no_reap {
         let report = isolation::reap_branch(&branch_name, force)?;
         print_reap_summary(&report);
     }
 
-    // Release isolated port allocation (no-op if not isolated)
-    let _ = isolation::release_isolation(&branch_name);
-
+    // Drop the database BEFORE releasing the allocation: the db_name lives in the
+    // registry entry that release removes, so dropping after it would lose the
+    // name (#23).
     if cleanup_db {
         isolation::drop_database(&branch_name);
     }
 
-    // Run pre_done hook if configured. It receives the same WORKZ_* context
-    // as post_start (issue #12), except WORKZ_FRAMEWORK — that's only known
-    // after a sync step, which done never runs.
-    if let Some(hook) = &config.hooks.pre_done {
-        let hook_alloc = alloc.as_ref().map(HookAllocation::from);
-        let vars = hook_env_vars(&root, &wt_path, &branch_name, None, hook_alloc.as_ref());
-        run_hook("pre_done", hook, &wt_path, &vars)?;
+    // Release isolated port allocation (no-op if not isolated)
+    let _ = isolation::release_isolation(&branch_name);
+
+    // Run pre_done hook if configured — only when the worktree still exists, since
+    // the hook runs with its cwd inside the worktree. It receives the same WORKZ_*
+    // context as post_start (issue #12) except WORKZ_FRAMEWORK.
+    if wt_exists {
+        if let Some(hook) = &config.hooks.pre_done {
+            let hook_alloc = alloc.as_ref().map(HookAllocation::from);
+            let vars = hook_env_vars(&root, &wt_path, &branch_name, None, hook_alloc.as_ref());
+            run_hook("pre_done", hook, &wt_path, &vars)?;
+        }
+    } else if config.hooks.pre_done.is_some() {
+        eprintln!("  note: skipping pre_done hook — worktree directory is already gone");
     }
 
-    println!("removing worktree at {}", wt_path.display());
-    git::worktree_remove(&wt_path, force)?;
+    if wt_exists {
+        println!("removing worktree at {}", wt_path.display());
+        git::worktree_remove(&wt_path, force)?;
+    } else {
+        // The directory is already gone; just clear the stale admin metadata.
+        println!("pruning stale worktree metadata");
+        let _ = git::worktree_prune();
+    }
 
     if delete_branch {
         println!("deleting branch '{}'", branch_name);
@@ -1010,6 +1039,7 @@ fn cmd_sync(
             &branch,
             &target,
             config.isolation.port_range_size,
+            config.isolation.base_port,
             report.framework,
             &config.isolation.services,
         )?)
@@ -1226,7 +1256,8 @@ fn cmd_clean(merged: bool, base: Option<&str>) -> Result<()> {
             .map(|s| s.to_string())
             .unwrap_or_else(git::default_branch);
 
-        let merged_branches = git::merged_branches(&base_branch)?;
+        let root = git::repo_root()?;
+        let merged_branches = git::merged_branches(&root, &base_branch)?;
         let worktrees = git::worktree_list()?;
 
         let to_remove: Vec<_> = worktrees

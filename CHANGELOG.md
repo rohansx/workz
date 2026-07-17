@@ -26,6 +26,34 @@ All notable changes to workz are documented here. This project adheres to
 
 ### Fixed
 
+- **`workz clean --merged` matches worktree branches again.** `git branch --merged`
+  prefixes a branch checked out in a linked worktree with `+ ` (git ≥ 2.23), which
+  the parser never stripped — so the command, whose targets are *always* worktree
+  branches, matched nothing and was a silent no-op. It now lists merged branches
+  with `--format=%(refname:short)` (no prefix, no detached-HEAD line). (#22)
+
+- **`workz done` completes cleanup when the worktree directory is already gone.**
+  It used to bail with "worktree not found", skipping every teardown step — but
+  agent hosts (e.g. Claude Code) delete worktree directories themselves at session
+  end, orphaning the database, port allocation, branch, and git metadata. `done`
+  now finishes from the registry: reaps/releases ports, drops the database (with
+  `--cleanup-db`), prunes the stale git metadata, and honors `--delete-branch`.
+  The database is now dropped *before* the allocation is released, since the
+  db name lives in the registry entry. (#23)
+
+- **A single invalid value in `.workz.toml` no longer silently discards the whole
+  file.** `load_config` swallowed deserialization errors, so one typo'd strategy
+  or wrong-typed value dropped the entire config — hooks stopped, overrides were
+  ignored, with no warning. Parse errors are now propagated with the offending
+  key, and `workz doctor` deserializes into the real `Config` (not just TOML
+  syntax), so it reports the same failures `load_config` does. (#21)
+
+- **`[isolation] base_port` in `.workz.toml` is now honored.** The value was
+  parsed (and `workz init` even wrote it) but never reached the allocator, which
+  only read `ports.json`. A project that sets `base_port = 4000` now actually
+  allocates from 4000; the per-repo config value takes precedence over the
+  machine-global registry default. (#24)
+
 - **`workz hook claude` now emits a recipe that actually works.** Claude Code's
   `WorktreeCreate` hook *replaces* worktree creation — it runs in the main
   checkout, receives `{name}` on stdin, and must create the worktree and print
