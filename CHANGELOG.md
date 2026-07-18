@@ -30,6 +30,13 @@ All notable changes to workz are documented here. This project adheres to
 
 ### Fixed
 
+- **The worktrunk hook recipe was wrong.** `workz hook worktrunk` (and the README)
+  emitted `[hooks] create = "workz sync --isolated --quiet"`, but worktrunk has no
+  `create` hook and hooks aren't nested under a `[hooks]` table. The correct recipe
+  is a top-level `pre-start = "workz sync --isolated --quiet"` in `.config/wt.toml` —
+  verified end-to-end against worktrunk 0.68 (it auto-provisions the new worktree on
+  `wt switch --create`).
+
 - **`workz clean --merged` matches worktree branches again.** `git branch --merged`
   prefixes a branch checked out in a linked worktree with `+ ` (git ≥ 2.23), which
   the parser never stripped — so the command, whose targets are *always* worktree
