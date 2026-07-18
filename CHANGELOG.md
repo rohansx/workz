@@ -7,6 +7,10 @@ All notable changes to workz are documented here. This project adheres to
 
 ### Added
 
+- **worktrunk subcommand (`wt workz`).** A `wt-workz` extension (`examples/wt-workz`)
+  that worktrunk dispatches as `wt workz`: bare it provisions the current worktree
+  (`workz sync --isolated`), otherwise it forwards to `workz`. Drop it on your PATH.
+
 - **Configurable worktree placement** (`[worktree] dir` in `.workz.toml`).
   A relative path resolves against the repo root (`dir = ".worktrees"` nests
   worktrees inside the project, Claude Code–style); an absolute path is used
