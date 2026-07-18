@@ -35,10 +35,17 @@ pub fn recipe(host: HookHost) -> Recipe {
             }
         }
         HookHost::Worktrunk => Recipe {
-            snippet: format!("[hooks]\ncreate = \"{CMD}\"\n"),
-            target_file: "your worktrunk config (e.g. ~/.config/worktrunk/config.toml)".to_string(),
+            // worktrunk hooks are top-level keys (not a `[hooks]` table), and it
+            // has no `create` hook — `pre-start` is the "set up before you start
+            // working" hook (worktrunk's own template uses `pre-start = "npm ci"`).
+            // It fires on `wt switch --create`, verified against worktrunk 0.68.
+            snippet: format!("pre-start = \"{CMD}\"\n"),
+            target_file: ".config/wt.toml".to_string(),
             installable: None,
-            note: None,
+            note: Some(
+                "Add it as a top-level key in .config/wt.toml (worktrunk hooks aren't nested under [hooks]). worktrunk asks to approve a project hook once."
+                    .to_string(),
+            ),
         },
         HookHost::Claude => Recipe {
             // Claude Code's WorktreeCreate hook REPLACES worktree creation: it runs in
@@ -164,6 +171,17 @@ mod tests {
             );
             assert!(!r.target_file.is_empty());
         }
+    }
+
+    #[test]
+    fn worktrunk_recipe_uses_pre_start_top_level_key() {
+        // Regression: worktrunk has no `create` hook and hooks are top-level keys,
+        // not a `[hooks]` table. `pre-start` is the provision-before-work hook
+        // (verified auto-provisioning a worktree against worktrunk 0.68).
+        let r = recipe(HookHost::Worktrunk);
+        assert!(r.snippet.contains("pre-start ="), "must use the pre-start hook");
+        assert!(!r.snippet.contains("[hooks]"), "worktrunk hooks aren't under [hooks]");
+        assert!(!r.snippet.contains("create ="), "worktrunk has no create hook");
     }
 
     #[test]
