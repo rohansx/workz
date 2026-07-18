@@ -1,0 +1,29 @@
+#!/bin/sh
+# wt-workz — a worktrunk extension that runs workz from inside a wt worktree.
+#
+# worktrunk dispatches `wt <name>` to an executable named `wt-<name>` on your
+# PATH (git-style subcommands), so dropping this script on your PATH makes
+# `wt workz` available:
+#
+#   wt workz            provision the current worktree — a collision-free port
+#                       range, per-worktree DB_NAME and COMPOSE_PROJECT_NAME,
+#                       merged idempotently into .env.local
+#   wt workz <args...>  forward straight to `workz <args...>`
+#                       (e.g. `wt workz status`, `wt workz done`)
+#
+# Install: copy it onto your PATH and make it executable, e.g.
+#   install -m 0755 examples/wt-workz ~/.local/bin/wt-workz
+#
+# See https://github.com/rohansx/workz
+set -eu
+
+if ! command -v workz >/dev/null 2>&1; then
+    echo "wt-workz: workz not found on PATH — install it from https://github.com/rohansx/workz" >&2
+    exit 127
+fi
+
+# Bare `wt workz` provisions the current worktree; anything else is a passthrough.
+if [ "$#" -eq 0 ]; then
+    exec workz sync --isolated
+fi
+exec workz "$@"

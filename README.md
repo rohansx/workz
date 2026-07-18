@@ -72,6 +72,19 @@ workz hook claude               # prints the Claude Code hook to paste
 
 `--json` makes sync output machine-readable; `--quiet` stays silent on success (warnings to stderr).
 
+### As a worktrunk subcommand (`wt workz`)
+
+[worktrunk](https://worktrunk.dev) dispatches `wt <name>` to a `wt-<name>` executable on your PATH (git-style). Drop [`examples/wt-workz`](examples/wt-workz) somewhere on your PATH and you get:
+
+```bash
+install -m 0755 examples/wt-workz ~/.local/bin/wt-workz   # once
+
+wt workz            # provision the current worktree: ports, DB, compose isolation
+wt workz status     # any workz command, under the wt namespace
+```
+
+`wt workz` complements worktrunk's stateless `hash_port`: it adds registry-backed (collision-proof) port ranges plus per-worktree Postgres and `COMPOSE_PROJECT_NAME` isolation, all opt-in.
+
 ## Commands
 
 | Command | Does |
