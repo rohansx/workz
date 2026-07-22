@@ -7,6 +7,13 @@ All notable changes to workz are documented here. This project adheres to
 
 ### Added
 
+- **`workz claude-hook` — native Claude Code `WorktreeCreate` hook.** Reads the
+  hook's JSON payload on stdin (`name`, or the documented `branch`/`worktree_path`),
+  creates and provisions the worktree, and prints **only** its path to stdout
+  (progress and any `post_start` output go to stderr, so the path Claude Code
+  parses stays clean). `workz hook claude` now emits a one-line `settings.json`
+  block pointing at it — no more `jq`/shell bridge. (#19)
+
 - **worktrunk subcommand (`wt workz`).** A `wt-workz` extension (`examples/wt-workz`)
   that worktrunk dispatches as `wt workz`: bare it provisions the current worktree
   (`workz sync --isolated`), otherwise it forwards to `workz`. Drop it on your PATH.

@@ -202,6 +202,31 @@ pub enum Commands {
     /// Start an MCP server exposing workz tools to AI agents (stdio transport)
     Mcp,
 
+    /// Claude Code `WorktreeCreate` hook: read the JSON payload on stdin, create
+    /// (and provision) the worktree, and print ONLY its path to stdout. Wire it
+    /// up with `workz hook claude`. Progress goes to stderr so stdout stays clean.
+    ClaudeHook {
+        /// Auto-assign PORT/DB_NAME/COMPOSE_PROJECT_NAME and write .env.local
+        #[arg(long)]
+        isolated: bool,
+
+        /// With --isolated, actually create the Postgres database (runs createdb)
+        #[arg(long)]
+        create_db: bool,
+
+        /// Clone the created database from this template (implies --create-db)
+        #[arg(long, value_name = "DB")]
+        from_db: Option<String>,
+
+        /// Skip symlink/copy/install
+        #[arg(long)]
+        no_sync: bool,
+
+        /// Base branch to create the worktree from (defaults to current HEAD)
+        #[arg(short, long)]
+        base: Option<String>,
+    },
+
     /// Set up workz for this project (interactive wizard; -y for defaults)
     Init {
         /// Run non-interactively with detected defaults

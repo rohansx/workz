@@ -159,6 +159,13 @@ fn main() -> Result<()> {
             None => init::run(yes),
         },
         Commands::Mcp => mcp::run(),
+        Commands::ClaudeHook {
+            isolated,
+            create_db,
+            from_db,
+            no_sync,
+            base,
+        } => cmd_claude_hook(isolated, create_db, from_db.as_deref(), no_sync, base.as_deref()),
         Commands::ShellInit { shell } => cmd_init(&shell),
     }
 }
@@ -390,6 +397,128 @@ fn run_hook(label: &str, hook: &str, wt_path: &Path, vars: &[(String, String)]) 
     if !status.success() {
         eprintln!("  warning: {label} hook exited with {status}");
     }
+    Ok(())
+}
+
+/// Claude Code `WorktreeCreate` hook (issue #19). The contract: Claude Code runs
+/// this in the *main* checkout, hands it a JSON payload on stdin, and parses our
+/// **stdout as the path of the worktree we must create**. So everything here
+/// prints progress to stderr and writes only the final worktree path to stdout.
+///
+/// 2.1.201 sends `{ "name": "<claude -w arg>" }` (underscores already dashed);
+/// the docs describe `branch` / `worktree_path`. We accept `name`, then
+/// `branch`, then the basename of `worktree_path`, and fail loudly if none is
+/// present rather than guessing.
+/// Resolve the branch name from a Claude Code `WorktreeCreate` payload. Prefers
+/// `name` (what 2.1.201 sends), then the documented `branch`, then the basename
+/// of `worktree_path`. Pure — unit-testable. Returns `None` if none is present.
+fn resolve_hook_branch(payload: &serde_json::Value) -> Option<String> {
+    let field = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    field("name").or_else(|| field("branch")).or_else(|| {
+        field("worktree_path")
+            .and_then(|p| Path::new(&p).file_name().map(|f| f.to_string_lossy().into_owned()))
+    })
+}
+
+fn cmd_claude_hook(
+    isolated: bool,
+    create_db: bool,
+    from_db: Option<&str>,
+    no_sync: bool,
+    base: Option<&str>,
+) -> Result<()> {
+    use std::io::Read;
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let payload: serde_json::Value = serde_json::from_str(input.trim()).unwrap_or(serde_json::Value::Null);
+
+    let branch = resolve_hook_branch(&payload).ok_or_else(|| {
+        anyhow::anyhow!(
+            "WorktreeCreate payload had no `name`, `branch`, or `worktree_path` — got: {}",
+            input.trim()
+        )
+    })?;
+    let branch = branch.trim();
+    if branch.is_empty() {
+        bail!("WorktreeCreate payload resolved an empty branch name");
+    }
+
+    let root = git::repo_root()?;
+    let config = config::load_config(&root)?;
+    let wt_path = git::worktree_path(&root, branch, config.worktree.dir.as_deref());
+
+    if wt_path.exists() {
+        // Idempotent: Claude Code reuses a name → we resume the existing worktree.
+        eprintln!("worktree already exists for '{branch}' — reusing");
+    } else {
+        eprintln!("creating worktree for '{branch}'");
+        git::worktree_add(&wt_path, branch, base)?;
+    }
+
+    let framework = if !no_sync {
+        let report = sync::sync_worktree(
+            &root,
+            &wt_path,
+            &config.sync,
+            sync::SyncOptions { no_install: false, quiet: true },
+        )?;
+        for w in &report.warnings {
+            eprintln!("  warning: {w}");
+        }
+        report.framework
+    } else {
+        sync::Framework::Unknown
+    };
+
+    let iso = if isolated {
+        let iso = isolation::setup_isolation(
+            &git::repo_name(&root),
+            branch,
+            &wt_path,
+            framework,
+            &config.isolation,
+        )?;
+        eprintln!(
+            "  isolated: PORT={}-{} DB_NAME={} COMPOSE_PROJECT_NAME={}",
+            iso.port, iso.port_end, iso.db_name, iso.compose_project
+        );
+        if create_db || from_db.is_some() {
+            isolation::create_database(&iso.db_name, from_db);
+        }
+        Some(iso)
+    } else {
+        if create_db || from_db.is_some() {
+            eprintln!("  note: --create-db requires --isolated (skipping)");
+        }
+        None
+    };
+
+    // Run post_start with the child's stdout captured onto *our* stderr, so a
+    // hook that prints (e.g. `createdb` chatter) can't pollute the path stdout.
+    if let Some(hook) = &config.hooks.post_start {
+        eprintln!("  running post_start hook...");
+        let alloc = iso.as_ref().map(HookAllocation::from);
+        let vars = hook_env_vars(&root, &wt_path, branch, Some(framework), alloc.as_ref());
+        let mut command = Command::new("sh");
+        command.args(["-c", hook]).current_dir(&wt_path).stderr(std::process::Stdio::inherit());
+        for (k, v) in &vars {
+            command.env(k, v);
+        }
+        match command.output() {
+            Ok(out) => {
+                if !out.stdout.is_empty() {
+                    eprint!("{}", String::from_utf8_lossy(&out.stdout));
+                }
+                if !out.status.success() {
+                    eprintln!("  warning: post_start hook exited with {}", out.status);
+                }
+            }
+            Err(e) => eprintln!("  warning: post_start hook failed to run: {e}"),
+        }
+    }
+
+    // The ONLY thing on stdout — Claude Code parses this as the worktree path.
+    println!("{}", wt_path.display());
     Ok(())
 }
 
@@ -1514,6 +1643,27 @@ complete -c workz -n "__fish_seen_subcommand_from shell-init init" -a "zsh bash 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_hook_branch_prefers_name_then_branch_then_path() {
+        use serde_json::json;
+        // 2.1.201: only `name`.
+        assert_eq!(resolve_hook_branch(&json!({"name": "feat-x"})).as_deref(), Some("feat-x"));
+        // `name` wins over `branch`.
+        assert_eq!(
+            resolve_hook_branch(&json!({"name": "n", "branch": "b"})).as_deref(),
+            Some("n")
+        );
+        // Documented `branch` when there's no `name`.
+        assert_eq!(resolve_hook_branch(&json!({"branch": "feat-b"})).as_deref(), Some("feat-b"));
+        // Fall back to the basename of `worktree_path`.
+        assert_eq!(
+            resolve_hook_branch(&json!({"worktree_path": "/x/repo--feat-c"})).as_deref(),
+            Some("repo--feat-c")
+        );
+        // Nothing usable → None (caller fails loudly).
+        assert!(resolve_hook_branch(&json!({"session_id": "z"})).is_none());
+    }
 
     #[test]
     fn emit_cd_writes_target_to_cd_file() {
