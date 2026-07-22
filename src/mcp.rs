@@ -169,12 +169,11 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
 
             if isolated {
                 let iso = isolation::setup_isolation(
+                    &git::repo_name(&root),
                     branch,
                     &wt_path,
-                    config.isolation.port_range_size,
-                    config.isolation.base_port,
                     framework,
-                    &config.isolation.services,
+                    &config.isolation,
                 )?;
                 result.push_str(&format!(
                     "\nisolated: PORT={}-{} DB_NAME={} COMPOSE_PROJECT_NAME={}",
@@ -246,12 +245,11 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
 
             let iso = if isolated {
                 Some(isolation::setup_isolation(
+                    &git::repo_name(&root),
                     &branch,
                     &path,
-                    config.isolation.port_range_size,
-                    config.isolation.base_port,
                     report.framework,
-                    &config.isolation.services,
+                    &config.isolation,
                 )?)
             } else {
                 None
@@ -315,11 +313,12 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
             let all = args["all"].as_bool().unwrap_or(false);
             let force = args["force"].as_bool().unwrap_or(false);
             let branch = args["branch"].as_str();
+            let repo = git::repo_root().map(|r| git::repo_name(&r)).unwrap_or_default();
 
             let report = if all {
                 isolation::reap_all(force)?
             } else if let Some(b) = branch {
-                isolation::reap_branch(b, force)?
+                isolation::reap_branch(&repo, b, force)?
             } else {
                 // Default: current worktree's branch.
                 let cwd = std::env::current_dir()?;
@@ -330,7 +329,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
                     );
                 }
                 let b = git::current_branch(&cwd)?;
-                isolation::reap_branch(&b, force)?
+                isolation::reap_branch(&repo, &b, force)?
             };
 
             Ok(serde_json::to_string_pretty(&report)?)

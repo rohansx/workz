@@ -240,12 +240,11 @@ fn cmd_start(
 
     let iso = if isolated {
         let iso = isolation::setup_isolation(
+            &git::repo_name(&root),
             branch,
             &wt_path,
-            config.isolation.port_range_size,
-            config.isolation.base_port,
             framework,
-            &config.isolation.services,
+            &config.isolation,
         )?;
         println!("  isolated environment:");
         if !iso.services.is_empty() {
@@ -691,6 +690,7 @@ fn cmd_done(
 ) -> Result<()> {
     let root = git::repo_root()?;
     let config = config::load_config(&root)?;
+    let repo = git::repo_name(&root);
 
     let (wt_path, branch_name) = if let Some(b) = branch {
         (
@@ -716,7 +716,7 @@ fn cmd_done(
     // directories themselves at session end, which would otherwise orphan the
     // database, ports, branch, and git metadata that `done` refuses to touch (#23).
     if !wt_exists {
-        let has_alloc = isolation::get_allocation(&branch_name).is_some();
+        let has_alloc = isolation::get_allocation(&repo, &branch_name).is_some();
         let has_meta = git::worktree_list()
             .map(|wts| wts.iter().any(|w| w.branch == branch_name))
             .unwrap_or(false);
@@ -733,7 +733,7 @@ fn cmd_done(
 
     // Capture the allocation before teardown releases it — the pre_done hook
     // still gets the allocated WORKZ_* values (issue #12).
-    let alloc = isolation::get_allocation(&branch_name);
+    let alloc = isolation::get_allocation(&repo, &branch_name);
 
     // Stop containers if docker-compose exists (skippable via --no-compose-down).
     // Needs the worktree directory, so skip it when the host already removed it.
@@ -744,7 +744,7 @@ fn cmd_done(
     // Reap processes bound to the worktree's allocated ports (skippable via --no-reap).
     // Registry-driven, so it runs whether or not the directory still exists.
     if !no_reap {
-        let report = isolation::reap_branch(&branch_name, force)?;
+        let report = isolation::reap_branch(&repo, &branch_name, force)?;
         print_reap_summary(&report);
     }
 
@@ -752,11 +752,11 @@ fn cmd_done(
     // registry entry that release removes, so dropping after it would lose the
     // name (#23).
     if cleanup_db {
-        isolation::drop_database(&branch_name);
+        isolation::drop_database(&repo, &branch_name);
     }
 
     // Release isolated port allocation (no-op if not isolated)
-    let _ = isolation::release_isolation(&branch_name);
+    let _ = isolation::release_isolation(&repo, &branch_name);
 
     // Run pre_done hook if configured — only when the worktree still exists, since
     // the hook runs with its cwd inside the worktree. It receives the same WORKZ_*
@@ -824,7 +824,7 @@ fn stop_docker(path: &std::path::Path, volumes: bool) {
 /// Build the sorted, de-duplicated list of port numbers we'd reap for the
 /// given target (single branch or every allocation). Returns Ok(vec![]) when
 /// no allocations exist — callers handle that as a no-op.
-fn compute_target_ports(branch: Option<&str>, all: bool) -> Result<Vec<u16>> {
+fn compute_target_ports(repo: &str, branch: Option<&str>, all: bool) -> Result<Vec<u16>> {
     let registry = isolation::load_registry();
     let mut out: Vec<u16> = Vec::new();
     if all {
@@ -834,8 +834,7 @@ fn compute_target_ports(branch: Option<&str>, all: bool) -> Result<Vec<u16>> {
             }
         }
     } else if let Some(b) = branch {
-        let slug = isolation::branch_to_slug(b);
-        if let Some(a) = registry.allocations.get(&slug) {
+        if let Some(a) = registry.allocations.get(&isolation::alloc_key(repo, b)) {
             for p in a.port..a.port.saturating_add(a.port_count) {
                 out.push(p);
             }
@@ -870,6 +869,7 @@ fn cmd_reap(
     force: bool,
     json: bool,
 ) -> Result<()> {
+    let repo = git::repo_root().map(|r| git::repo_name(&r)).unwrap_or_default();
     // Resolve the target branch. `--all` reaps every port workz has allocated.
     let target_branch: Option<String> = if all {
         None
@@ -895,7 +895,7 @@ fn cmd_reap(
 
     // Compute the target port list once so we can both preview it (for the
     // confirmation prompt) and pass it to the reap call without double-running.
-    let target_ports = compute_target_ports(target_branch.as_deref(), all)?;
+    let target_ports = compute_target_ports(&repo, target_branch.as_deref(), all)?;
 
     // Interactive confirmation when there's something to kill, unless --yes.
     if !yes && !json && !target_ports.is_empty() {
@@ -916,7 +916,7 @@ fn cmd_reap(
     let report = if all {
         isolation::reap_all(force)?
     } else if let Some(b) = &target_branch {
-        isolation::reap_branch(b, force)?
+        isolation::reap_branch(&repo, b, force)?
     } else {
         isolation::ReapReport::default()
     };
@@ -934,6 +934,7 @@ fn cmd_reap(
 /// send a signal. Uses the public `listeners_on_port` scanner so there's zero
 /// side effects — unlike `reap_*` which always terminates.
 fn cmd_reap_dry_run(branch: Option<&str>, all: bool, json: bool) -> Result<()> {
+    let repo = git::repo_root().map(|r| git::repo_name(&r)).unwrap_or_default();
     use serde::Serialize;
 
     #[derive(Serialize)]
@@ -949,9 +950,9 @@ fn cmd_reap_dry_run(branch: Option<&str>, all: bool, json: bool) -> Result<()> {
     let entries: Vec<(String, isolation::PortAllocation)> = if all {
         registry.allocations.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     } else if let Some(b) = branch {
-        let slug = isolation::branch_to_slug(b);
-        match registry.allocations.get(&slug).cloned() {
-            Some(a) => vec![(slug, a)],
+        let key = isolation::alloc_key(&repo, b);
+        match registry.allocations.get(&key).cloned() {
+            Some(a) => vec![(key, a)],
             None => {
                 if !json {
                     println!("no port allocation for branch '{b}'");
@@ -1036,12 +1037,11 @@ fn cmd_sync(
     // Optionally allocate an isolated environment.
     let iso = if isolated {
         Some(isolation::setup_isolation(
+            &git::repo_name(&root),
             &branch,
             &target,
-            config.isolation.port_range_size,
-            config.isolation.base_port,
             report.framework,
-            &config.isolation.services,
+            &config.isolation,
         )?)
     } else {
         None
@@ -1129,6 +1129,7 @@ fn cmd_sync(
 
 fn cmd_status() -> Result<()> {
     let worktrees = git::worktree_list()?;
+    let repo = git::repo_root().map(|r| git::repo_name(&r)).unwrap_or_default();
 
     if worktrees.is_empty() {
         println!("no worktrees found");
@@ -1155,7 +1156,7 @@ fn cmd_status() -> Result<()> {
             || wt.path.join("compose.yaml").exists();
         let docker = if has_compose { "  [docker]" } else { "" };
 
-        let port_info = isolation::get_allocation(&wt.branch)
+        let port_info = isolation::get_allocation(&repo, &wt.branch)
             .map(|a| {
                 if a.port_count > 1 {
                     format!("  PORT:{}-{}", a.port, a.port + a.port_count - 1)
@@ -1170,7 +1171,7 @@ fn cmd_status() -> Result<()> {
         // main repo's config can't be loaded we just skip the extra detail.
         let services_info = match git::repo_root().ok().and_then(|r| config::load_config(&r).ok()) {
             Some(cfg) if !cfg.isolation.services.is_empty() => {
-                if let Some(alloc) = isolation::get_allocation(&wt.branch) {
+                if let Some(alloc) = isolation::get_allocation(&repo, &wt.branch) {
                     let pairs: Vec<String> = cfg
                         .isolation
                         .services

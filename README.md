@@ -129,7 +129,13 @@ COMPOSE_PROJECT_NAME=feat_api
 
 - If your `.env.local` already has a `DATABASE_URL`, workz keeps its driver/host/port/credentials and only swaps the database name.
 - Add `--create-db` to actually create the Postgres database (`createdb`), or `--create-db --from-db dev` to clone it from a template. `workz done --cleanup-db` drops it. If `createdb` isn't on `PATH`, workz falls back to a per-worktree `postgres:16-alpine` docker container named `workz-pg-<slug>`, torn down by `workz done --cleanup-db`.
-- Port ranges are tracked in `~/.config/workz/ports.json` and released on `workz done`. `workz doctor --fix` reclaims orphans.
+- Port ranges are tracked in `~/.config/workz/ports.json`, **keyed per repo**, and released on `workz done`. `workz doctor --fix` reclaims orphans.
+- **Using the same branch name across repos?** Set a name template so their databases and compose projects don't collide:
+  ```toml
+  [isolation]
+  db_name         = "{repo}_{slug}"   # placeholders: {slug}, {repo}, {branch}; default "{slug}"
+  compose_project = "{repo}_{slug}"
+  ```
 - Dev servers left bound to allocated ports are reaped automatically — by `workz done` (skip with `--no-reap`), by `workz reap [branch]` (with `--all` for global cleanup, `--dry-run` to preview), and by `workz doctor --fix` when the worktree is already gone. Backed by `lsof`; the registry makes it precise — only ports workz owns are ever touched.
 
 ## Monorepos / named services
