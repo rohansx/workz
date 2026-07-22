@@ -204,6 +204,20 @@ pub struct IsolationConfig {
     /// single `PORT` + framework-specific vars still apply).
     #[serde(default)]
     pub services: Vec<String>,
+
+    /// Template for the per-worktree database name. Placeholders: `{slug}`
+    /// (slugified branch), `{repo}` (repository name), `{branch}` (raw branch).
+    /// Defaults to `{slug}` (today's behavior). Set `{repo}_{slug}` when the
+    /// same branch name is used across repos, so their databases don't collide
+    /// (#28). The rendered name is slugified so it's a valid identifier.
+    #[serde(default)]
+    pub db_name: Option<String>,
+
+    /// Template for `COMPOSE_PROJECT_NAME`, same placeholders and default as
+    /// `db_name`. Use `{repo}_{slug}` to keep compose stacks distinct across
+    /// repos that share a branch name (#28).
+    #[serde(default)]
+    pub compose_project: Option<String>,
 }
 
 fn default_port_range_size() -> u16 { 10 }
@@ -215,6 +229,8 @@ impl Default for IsolationConfig {
             port_range_size: default_port_range_size(),
             base_port: default_base_port(),
             services: Vec::new(),
+            db_name: None,
+            compose_project: None,
         }
     }
 }

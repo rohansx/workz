@@ -159,31 +159,51 @@ fn next_available_port_range_with(
 // ── Main API ─────────────────────────────────────────────────────────────────
 
 /// Allocate a port range, compute derived names, update registry, write .env.local.
+/// Registry key for an allocation. Repo-qualified (`<repo>/<branch-slug>`) so
+/// the same branch name in two different repositories gets distinct
+/// allocations instead of colliding on the bare slug (#28).
+pub fn alloc_key(repo: &str, branch: &str) -> String {
+    format!("{}/{}", branch_to_slug(repo), branch_to_slug(branch))
+}
+
+/// Render a db/compose-project name template. Placeholders: `{slug}` (branch
+/// slug), `{repo}` (repository name), `{branch}` (raw branch). The result is
+/// slugified so it's always a valid identifier. Default template `{slug}`
+/// reproduces the historical name exactly.
+fn render_name(template: &str, repo: &str, branch: &str) -> String {
+    let rendered = template
+        .replace("{slug}", &branch_to_slug(branch))
+        .replace("{repo}", repo)
+        .replace("{branch}", branch);
+    branch_to_slug(&rendered)
+}
+
 pub fn setup_isolation(
+    repo: &str,
     branch: &str,
     wt_path: &Path,
-    range_size: u16,
-    base_port: u16,
     framework: Framework,
-    services: &[String],
+    iso: &crate::config::IsolationConfig,
 ) -> Result<IsolationConfig> {
     let mut registry = load_registry();
-    let slug = branch_to_slug(branch);
+    let key = alloc_key(repo, branch);
+    let db_template = iso.db_name.as_deref().unwrap_or("{slug}");
+    let compose_template = iso.compose_project.as_deref().unwrap_or("{slug}");
 
-    let alloc = if let Some(existing) = registry.allocations.get(&slug) {
+    let alloc = if let Some(existing) = registry.allocations.get(&key) {
         existing.clone()
     } else {
-        let port = next_available_port_range(&registry, range_size, base_port);
+        let port = next_available_port_range(&registry, iso.port_range_size, iso.base_port);
         let alloc = PortAllocation {
             port,
-            port_count: range_size,
+            port_count: iso.port_range_size,
             branch: branch.to_string(),
-            db_name: slug.clone(),
-            compose_project: slug.clone(),
+            db_name: render_name(db_template, repo, branch),
+            compose_project: render_name(compose_template, repo, branch),
             worktree_path: wt_path.to_string_lossy().to_string(),
             allocated_at: rfc3339_now(),
         };
-        registry.allocations.insert(slug.clone(), alloc.clone());
+        registry.allocations.insert(key.clone(), alloc.clone());
         save_registry(&registry)?;
         alloc
     };
@@ -191,7 +211,8 @@ pub fn setup_isolation(
     // Named services: each consumes one port from the range, in order. The
     // first named service doubles as the top-level `PORT` for backward compat
     // (any single-service config keeps working unchanged).
-    let svc_pairs: Vec<(String, u16)> = services
+    let svc_pairs: Vec<(String, u16)> = iso
+        .services
         .iter()
         .enumerate()
         .map(|(i, name)| {
@@ -213,10 +234,9 @@ pub fn setup_isolation(
 }
 
 /// Release a port allocation. Called by cmd_done.
-pub fn release_isolation(branch: &str) -> Result<()> {
-    let slug = branch_to_slug(branch);
+pub fn release_isolation(repo: &str, branch: &str) -> Result<()> {
     let mut registry = load_registry();
-    if registry.allocations.remove(&slug).is_some() {
+    if registry.allocations.remove(&alloc_key(repo, branch)).is_some() {
         save_registry(&registry)?;
     }
     Ok(())
@@ -270,16 +290,17 @@ pub fn create_database(db_name: &str, from_db: Option<&str>) {
 /// Best-effort: drop the PostgreSQL database for a branch. If we
 /// previously started a docker container for it (see
 /// [`start_docker_postgres`]), stop and remove that too.
-pub fn drop_database(branch: &str) {
-    let slug = branch_to_slug(branch);
+pub fn drop_database(repo: &str, branch: &str) {
     let db_name = load_registry()
         .allocations
-        .get(&slug)
+        .get(&alloc_key(repo, branch))
         .map(|a| a.db_name.clone())
-        .unwrap_or_else(|| slug.clone());
+        .unwrap_or_else(|| branch_to_slug(branch));
 
-    // First: tear down the docker container if it exists.
-    stop_docker_postgres(&slug);
+    // First: tear down the docker container if it exists. It's named after the
+    // db_name (see start_docker_postgres), which may differ from the slug when
+    // a db_name template is configured (#28) — so key it off db_name, not slug.
+    stop_docker_postgres(&db_name);
 
     // Then: try dropdb (the system Postgres cleanup path).
     match Command::new("dropdb").arg("--if-exists").arg(&db_name).status() {
@@ -350,8 +371,8 @@ fn start_docker_postgres(db_name: &str, from_db: Option<&str>) {
     }
 }
 
-fn stop_docker_postgres(slug: &str) {
-    let container = format!("workz-pg-{}", sanitize_for_container(slug));
+fn stop_docker_postgres(db_name: &str) {
+    let container = format!("workz-pg-{}", sanitize_for_container(db_name));
     if let Some(cmd) = pick_docker_cmd() {
         // `docker stop` is the polite path; fall back to `rm -f` if the
         // container is in a weird state. --quiet keeps the noise down.
@@ -402,9 +423,8 @@ fn sanitize_for_container(s: &str) -> String {
 }
 
 /// Look up the allocation for a branch (for status display).
-pub fn get_allocation(branch: &str) -> Option<PortAllocation> {
-    let slug = branch_to_slug(branch);
-    load_registry().allocations.get(&slug).cloned()
+pub fn get_allocation(repo: &str, branch: &str) -> Option<PortAllocation> {
+    load_registry().allocations.get(&alloc_key(repo, branch)).cloned()
 }
 
 /// Slugs whose worktree path no longer exists (orphaned allocations). The
@@ -790,10 +810,9 @@ pub fn reap_ports(ports: &[u16], force: bool) -> ReapReport {
 
 /// Reap processes for the workz port range allocated to `branch`. No-op (and
 /// returns an empty report) if the branch has no allocation.
-pub fn reap_branch(branch: &str, force: bool) -> Result<ReapReport> {
-    let slug = branch_to_slug(branch);
+pub fn reap_branch(repo: &str, branch: &str, force: bool) -> Result<ReapReport> {
     let registry = load_registry();
-    let Some(alloc) = registry.allocations.get(&slug) else {
+    let Some(alloc) = registry.allocations.get(&alloc_key(repo, branch)) else {
         return Ok(ReapReport::default());
     };
     let ports: Vec<u16> = (alloc.port..alloc.port.saturating_add(alloc.port_count)).collect();
@@ -984,6 +1003,26 @@ mod tests {
 
         let port2 = next_available_port_range_with(&registry, 10, 0, |_| true);
         assert_eq!(port2, 3010);
+    }
+
+    #[test]
+    fn alloc_key_is_repo_qualified() {
+        // Regression for #28: the same branch name in two repos must key to
+        // distinct allocations, not collide on the bare slug.
+        assert_ne!(
+            alloc_key("repo-a", "feature-x"),
+            alloc_key("repo-b", "feature-x")
+        );
+        assert_eq!(alloc_key("myapp", "feature/x"), "myapp/feature_x");
+    }
+
+    #[test]
+    fn render_name_templates_and_slugifies() {
+        // Default template reproduces today's name.
+        assert_eq!(render_name("{slug}", "myapp", "feature/x"), "feature_x");
+        // {repo} placeholder disambiguates across repos, result stays a valid id.
+        assert_eq!(render_name("{repo}_{slug}", "my-app", "feature/x"), "my_app_feature_x");
+        assert_eq!(render_name("{branch}", "r", "Feature/X"), "feature_x");
     }
 
     #[test]

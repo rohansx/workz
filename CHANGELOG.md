@@ -30,6 +30,16 @@ All notable changes to workz are documented here. This project adheres to
 
 ### Fixed
 
+- **Same-named worktrees in different repos no longer collide** (data-loss-adjacent).
+  The port registry was keyed by the bare branch slug, so `workz start feature-x
+  --isolated` in two repos double-booked the same port range and database, and
+  `workz done --cleanup-db` in one repo tore down the other's environment. The
+  registry is now keyed **per repo** (`<repo>/<slug>`), so each repo gets its own
+  allocation. New `[isolation] db_name` / `compose_project` name templates
+  (placeholders `{slug}`, `{repo}`, `{branch}`; default `{slug}`) let you set
+  `db_name = "{repo}_{slug}"` so the database/compose names are distinct across
+  repos too. (#28)
+
 - **The worktrunk hook recipe was wrong.** `workz hook worktrunk` (and the README)
   emitted `[hooks] create = "workz sync --isolated --quiet"`, but worktrunk has no
   `create` hook and hooks aren't nested under a `[hooks]` table. The correct recipe
