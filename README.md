@@ -61,7 +61,7 @@ Let your editor/agent create worktrees natively; point its setup hook at `workz 
 <tr><th>Host</th><th>Recipe</th></tr>
 <tr><td><b>Cursor</b></td><td><code>.cursor/worktrees.json</code> → <code>{ "setup-worktree": ["workz","sync","--isolated","--quiet"] }</code></td></tr>
 <tr><td><b>worktrunk</b></td><td><code>.config/wt.toml</code> → <code>pre-start = "workz sync --isolated --quiet"</code></td></tr>
-<tr><td><b>Claude Code</b></td><td><code>WorktreeCreate</code> <i>replaces</i> worktree creation, so it needs a create-and-print-path hook — run <code>workz hook claude</code> for the recipe (needs <code>jq</code>)</td></tr>
+<tr><td><b>Claude Code</b></td><td><code>WorktreeCreate</code> hook → <code>workz claude-hook --isolated</code> (run <code>workz hook claude</code> for the <code>settings.json</code> block)</td></tr>
 <tr><td><b>anything else</b></td><td><code>workz sync --isolated --quiet &lt;path&gt;</code></td></tr>
 </table>
 
