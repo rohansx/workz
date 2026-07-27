@@ -6,6 +6,7 @@ mod hook;
 mod init;
 mod isolation;
 mod mcp;
+mod run;
 mod sync;
 
 use anyhow::{bail, Result};
@@ -158,6 +159,15 @@ fn main() -> Result<()> {
             },
             None => init::run(yes),
         },
+        Commands::Run {
+            branch,
+            stop,
+            logs,
+            lines,
+            all,
+            force,
+        } => cmd_run(branch.as_deref(), stop, logs, lines, all, force),
+        Commands::Preview { json } => cmd_preview(json),
         Commands::Mcp => mcp::run(),
         Commands::ClaudeHook {
             isolated,
@@ -950,6 +960,117 @@ fn stop_docker(path: &std::path::Path, volumes: bool) {
 
 // ── reap ───────────────────────────────────────────────────────────────
 
+// ── run / preview ──────────────────────────────────────────────────────
+
+/// Resolve which branch a run/preview command targets: an explicit name, or the
+/// branch of the worktree we're standing in.
+fn resolve_run_branch(branch: Option<&str>) -> Result<String> {
+    if let Some(b) = branch {
+        return Ok(b.to_string());
+    }
+    let cwd = std::env::current_dir()?;
+    let root = git::repo_root()?;
+    if cwd == root {
+        bail!("you're in the main worktree — pass a branch name (or use --all)");
+    }
+    git::current_branch(&cwd)
+}
+
+fn cmd_run(
+    branch: Option<&str>,
+    stop: bool,
+    logs: bool,
+    lines: usize,
+    all: bool,
+    force: bool,
+) -> Result<()> {
+    let root = git::repo_root()?;
+    let config = config::load_config(&root)?;
+    let repo = git::repo_name(&root);
+
+    if all {
+        // Every worktree that has an allocation — the fan-out case.
+        let rows = run::collect(&repo)?;
+        let targets: Vec<_> = rows.iter().filter(|r| r.port.is_some()).collect();
+        if targets.is_empty() {
+            println!("no worktrees with a port allocation (create one with --isolated)");
+            return Ok(());
+        }
+        for row in targets {
+            if stop {
+                run::stop(&repo, &row.branch, force)?;
+            } else {
+                println!("[{}]", row.branch);
+                if let Err(e) = run::start(&repo, &row.branch, &row.path, &config.run) {
+                    eprintln!("  warning: {e}");
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    let branch_name = resolve_run_branch(branch)?;
+
+    if logs {
+        return run::logs(&repo, &branch_name, lines);
+    }
+    if stop {
+        return run::stop(&repo, &branch_name, force);
+    }
+
+    let wt_path = git::worktree_path(&root, &branch_name, config.worktree.dir.as_deref());
+    run::start(&repo, &branch_name, &wt_path, &config.run)
+}
+
+fn cmd_preview(json: bool) -> Result<()> {
+    let root = git::repo_root()?;
+    let repo = git::repo_name(&root);
+    let rows = run::collect(&repo)?;
+
+    if json {
+        let out: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "branch": r.branch,
+                    "path": r.path.to_string_lossy(),
+                    "port": r.port,
+                    "port_end": r.port_end,
+                    "url": r.url(),
+                    "live": r.live,
+                    "pid": r.pid,
+                    "command": r.command,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("no worktrees");
+        return Ok(());
+    }
+
+    let live_count = rows.iter().filter(|r| r.live).count();
+    for r in &rows {
+        let status = if r.live { "live" } else { "down" };
+        let url = r.url().unwrap_or_else(|| "—".to_string());
+        let detail = match (&r.command, r.pid) {
+            (Some(c), Some(p)) => format!("  {c} (pid {p})"),
+            _ => String::new(),
+        };
+        let range = match (r.port, r.port_end) {
+            (Some(s), Some(e)) if e > s => format!("{s}-{e}"),
+            (Some(s), _) => s.to_string(),
+            _ => "—".to_string(),
+        };
+        println!("  {:<6} {:<24} {:<12} {}{}", status, r.branch, range, url, detail);
+    }
+    println!("\n○ {live_count} of {} worktree(s) live", rows.len());
+    Ok(())
+}
+
 /// Build the sorted, de-duplicated list of port numbers we'd reap for the
 /// given target (single branch or every allocation). Returns Ok(vec![]) when
 /// no allocations exist — callers handle that as a no-op.
@@ -1467,6 +1588,8 @@ if [ -n "$ZSH_VERSION" ]; then
             'sync:Sync symlinks, env files, and deps'
             'status:Show rich status of all worktrees'
             'done:Remove a worktree (kills allocated-port processes, compose down, optional DB drop)'
+            'run:Start a worktree'\''s dev server on its allocated port'
+            'preview:Show which worktrees are running, and at which URL'
             'reap:Kill processes bound to ports workz allocated'
             'clean:Prune orphaned worktrees'
             'conflicts:Show files modified in multiple worktrees'
@@ -1539,7 +1662,7 @@ else
         prev="${COMP_WORDS[COMP_CWORD-1]}"
 
         if [[ ${COMP_CWORD} -eq 1 ]]; then
-        COMPREPLY=($(compgen -W "start list ls switch s sync status done reap clean conflicts doctor hook init mcp shell-init" -- "$cur"))
+        COMPREPLY=($(compgen -W "start list ls switch s sync status done run preview reap clean conflicts doctor hook init mcp shell-init" -- "$cur"))
                 return
             fi
 
@@ -1604,6 +1727,8 @@ complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s syn
 complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a sync -d "Sync symlinks, env files, and deps"
 complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a status -d "Show rich status of all worktrees"
 complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a done -d "Remove a worktree (kills allocated-port processes, compose down, optional DB drop)"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done run preview reap clean conflicts doctor hook mcp shell-init init" -a run -d "Start a worktree's dev server"
+complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done run preview reap clean conflicts doctor hook mcp shell-init init" -a preview -d "Show which worktrees are running"
 complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a reap -d "Kill processes bound to ports workz allocated"
 complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a clean -d "Prune orphaned worktrees"
 complete -c workz -n "not __fish_seen_subcommand_from start list ls switch s sync status done reap clean conflicts doctor hook mcp shell-init init" -a conflicts -d "Show files modified in multiple worktrees"

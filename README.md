@@ -95,6 +95,8 @@ wt workz status     # any workz command, under the wt namespace
 | `workz` / `workz status` | Every worktree at a glance: branch, dirty state, size, port range, service map |
 | `workz switch [query]` | Fuzzy-jump between worktrees |
 | `workz list` | List worktrees (`ls`) |
+| `workz run [branch]` | Start the worktree's dev server on its allocated port (`--stop`, `--logs`, `--all`) |
+| `workz preview` | Which worktrees are live, and at which URL (`--json`) |
 | `workz done [branch]` | Remove a worktree — auto-reaps allocated-port processes, compose down, optional DB drop (`--force`, `--delete-branch`, `--cleanup-db`, `--no-reap`, `--no-compose-down`, `--compose-volumes`) |
 | `workz reap [branch]` | Kill processes bound to ports workz allocated (`--all`, `--yes`, `--dry-run`, `--force`, `--json`) |
 | `workz clean` | Prune stale worktrees (`--merged` removes merged branches) |
@@ -137,6 +139,29 @@ COMPOSE_PROJECT_NAME=feat_api
   compose_project = "{repo}_{slug}"
   ```
 - Dev servers left bound to allocated ports are reaped automatically — by `workz done` (skip with `--no-reap`), by `workz reap [branch]` (with `--all` for global cleanup, `--dry-run` to preview), and by `workz doctor --fix` when the worktree is already gone. Backed by `lsof`; the registry makes it precise — only ports workz owns are ever touched.
+
+## Run it, and see it running
+
+Isolation gives each worktree a port — `workz run` actually starts the app on it, and `workz preview` tells you which agents' work you can click:
+
+```bash
+workz run feat-auth          # starts the dev server on this worktree's port
+workz run --all              # every worktree that has an allocation
+workz preview
+```
+
+```
+  live   feat-auth    3000-3009   http://localhost:3000   node (pid 6153)
+  live   feat-api     3010-3019   http://localhost:3010   node (pid 6198)
+  down   feat-docs    3020-3029   http://localhost:3020
+
+  ○ 2 of 3 worktree(s) live
+```
+
+- The dev command is auto-detected (`package.json` `dev` script with your lockfile's package manager, `cargo run`, `bin/rails server`, `manage.py runserver`, `go run .`). Override it with `[run] cmd = "..."` in `.workz.toml`.
+- The worktree's managed vars (`PORT`, `DATABASE_URL`, `COMPOSE_PROJECT_NAME`, `PORT_<SERVICE>`) are injected into the process, so it binds *its* port and talks to *its* database.
+- Runs detached with logs captured — `workz run <branch> --logs` tails them, `--stop` stops it.
+- `preview` observes liveness (what's actually listening on the ports workz allocated), so there's no stale state to clean up. `--json` for cockpits and agents.
 
 ## Monorepos / named services
 
