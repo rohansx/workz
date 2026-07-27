@@ -7,6 +7,24 @@ All notable changes to workz are documented here. This project adheres to
 
 ### Added
 
+- **`workz run` — start a worktree's dev server on the port workz allocated it.**
+  Isolation used to stop at *assigning* a port; `run` actually starts the app on
+  it. The dev command is auto-detected (`package.json` `dev` script with the
+  lockfile's package manager, `cargo run`, `bin/rails server`,
+  `manage.py runserver`, `go run .`) or set via `[run] cmd` in `.workz.toml`.
+  The worktree's managed vars (`PORT`, `DATABASE_URL`, `COMPOSE_PROJECT_NAME`,
+  `PORT_<SERVICE>`) are injected into the process, so it binds its own port and
+  talks to its own database. Runs detached with logs captured:
+  `--logs` tails them, `--stop` stops it (reusing the reap path, so it only ever
+  touches ports workz allocated), `--all` fans out across worktrees. (V3 §4.1)
+
+- **`workz preview` — see which worktrees are live, and at which URL.** A table of
+  branch · port range · URL · status · listening process, plus `--json` for
+  cockpits and agents. Liveness is *observed* (what's actually listening on the
+  allocated ports), so there's no PID state to go stale. This is the
+  "click a link and see the feature running" answer to reviewing parallel agent
+  work. (V3 §4.2)
+
 - **`workz claude-hook` — native Claude Code `WorktreeCreate` hook.** Reads the
   hook's JSON payload on stdin (`name`, or the documented `branch`/`worktree_path`),
   creates and provisions the worktree, and prints **only** its path to stdout

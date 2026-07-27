@@ -15,6 +15,18 @@ pub struct Config {
     pub isolation: IsolationConfig,
     #[serde(default)]
     pub worktree: WorktreeConfig,
+    #[serde(default)]
+    pub run: RunConfig,
+}
+
+/// How `workz run` starts the worktree's dev server.
+#[derive(Debug, Default, Deserialize)]
+pub struct RunConfig {
+    /// Command to start the dev server, run via `sh -c` inside the worktree.
+    /// When unset, workz auto-detects it from the project (package.json `dev`
+    /// script with the right package manager, `cargo run`, Rails, Django, Go…).
+    #[serde(default)]
+    pub cmd: Option<String>,
 }
 
 /// Where new worktrees are placed. Zero-config default keeps today's behavior
@@ -372,6 +384,8 @@ fn merge_configs(global: Config, project: Config) -> Config {
     let isolation = if project.isolation.port_range_size != default_iso.port_range_size
         || project.isolation.base_port != default_iso.base_port
         || !project.isolation.services.is_empty()
+        || project.isolation.db_name.is_some()
+        || project.isolation.compose_project.is_some()
     {
         project.isolation
     } else {
@@ -382,7 +396,11 @@ fn merge_configs(global: Config, project: Config) -> Config {
         dir: project.worktree.dir.or(global.worktree.dir),
     };
 
-    Config { sync, hooks, isolation, worktree }
+    let run = RunConfig {
+        cmd: project.run.cmd.or(global.run.cmd),
+    };
+
+    Config { sync, hooks, isolation, worktree, run }
 }
 
 /// Concatenate two vecs (global first, then project).

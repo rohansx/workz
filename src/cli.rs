@@ -199,6 +199,39 @@ pub enum Commands {
         install: bool,
     },
 
+    /// Start a worktree's dev server on the port workz allocated it
+    Run {
+        /// Branch whose worktree to run (defaults to the current worktree)
+        branch: Option<String>,
+
+        /// Stop the dev server instead of starting it
+        #[arg(long)]
+        stop: bool,
+
+        /// Print the tail of the run log
+        #[arg(long)]
+        logs: bool,
+
+        /// With --logs, how many lines to show
+        #[arg(long, default_value = "40", value_name = "N")]
+        lines: usize,
+
+        /// Start (or stop) every worktree that has a port allocation
+        #[arg(long)]
+        all: bool,
+
+        /// With --stop, SIGKILL immediately instead of SIGTERM first
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Show which worktrees are running, and at which URL
+    Preview {
+        /// Emit JSON instead of a table (for cockpits and agents)
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Start an MCP server exposing workz tools to AI agents (stdio transport)
     Mcp,
 
