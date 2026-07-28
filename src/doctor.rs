@@ -371,6 +371,77 @@ fn check_worktrees(root: &Path, fix: bool, out: &mut Vec<String>) -> u32 {
         problems += broken_total;
     }
 
+    problems += check_declared_symlinks(root, &worktrees, out);
+
+    problems
+}
+
+/// Declared-vs-actual reconciliation (issue #35).
+///
+/// `broken_symlinks` asks "does every symlink point at something real?" — so a
+/// worktree where *nothing was linked at all* passes trivially. The failure that
+/// actually costs time is the inverse: a path declared in `symlink_add` that
+/// isn't a symlink into the main worktree, leaving the worktree silently running
+/// on private state. This checks every declared path in every live worktree.
+fn check_declared_symlinks(root: &Path, worktrees: &[git::Worktree], out: &mut Vec<String>) -> u32 {
+    let declared = match config::load_config(root) {
+        Ok(c) => c.sync.resolve().declared,
+        Err(_) => return 0, // config problems are reported by check_config
+    };
+    if declared.is_empty() {
+        return 0;
+    }
+
+    let mut problems = 0;
+    let mut checked = 0;
+    for wt in worktrees.iter().filter(|w| !w.is_bare && w.path.exists() && w.path != *root) {
+        for rel in &declared {
+            // Globs are expanded at sync time; reconciling them here would need
+            // the same expansion, so report on the concrete entries only.
+            if rel.contains('*') {
+                continue;
+            }
+            checked += 1;
+            let path = wt.path.join(rel);
+            let Ok(meta) = path.symlink_metadata() else {
+                out.push(format!(
+                    "[warn] {} declares {rel} but it is missing — run: workz sync",
+                    wt.branch
+                ));
+                problems += 1;
+                continue;
+            };
+            if !meta.file_type().is_symlink() {
+                out.push(format!(
+                    "[warn] {} has {rel} as a real path, not a symlink — it is NOT shared with the main worktree",
+                    wt.branch
+                ));
+                problems += 1;
+                continue;
+            }
+            // It is a symlink — make sure it resolves back into the main checkout
+            // rather than dangling or pointing at another worktree.
+            match std::fs::canonicalize(&path) {
+                Ok(resolved) if resolved.starts_with(root) => {}
+                Ok(resolved) => {
+                    out.push(format!(
+                        "[warn] {} has {rel} pointing outside the main worktree ({})",
+                        wt.branch,
+                        resolved.display()
+                    ));
+                    problems += 1;
+                }
+                Err(_) => {
+                    out.push(format!("[warn] {} has {rel} as a dangling symlink", wt.branch));
+                    problems += 1;
+                }
+            }
+        }
+    }
+
+    if problems == 0 && checked > 0 {
+        out.push(format!("[ok] all {checked} declared shared path(s) correct"));
+    }
     problems
 }
 
