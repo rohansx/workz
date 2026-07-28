@@ -3,7 +3,13 @@
 All notable changes to workz are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.15.0] ("Lights On")
+
+The runtime release. workz stopped at *provisioning* a worktree — allocating a
+port, a database, a compose project — and handed back something configured but
+dead. `workz run` starts it; `workz preview` shows you which agents' work you can
+actually click. Plus a class of silent-failure fixes from two field reports: sync
+no longer claims success while skipping declared paths.
 
 ### Added
 
