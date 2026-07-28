@@ -70,7 +70,13 @@ impl SyncReport {
             lines.push(format!("  installed deps ({cmd})"));
         }
         if lines.is_empty() {
-            "  nothing to sync (already up to date)".to_string()
+            // Don't claim success when declared work was skipped — that message
+            // is what made the failure invisible in issue #32.
+            if self.warnings.is_empty() {
+                "  nothing to sync (already up to date)".to_string()
+            } else {
+                "  nothing synced — see the warnings below".to_string()
+            }
         } else {
             lines.join("\n")
         }
@@ -92,7 +98,7 @@ pub fn sync_worktree(
         framework: project.framework,
         ..Default::default()
     };
-    symlink_dirs(source, target, &plan.symlink_dirs, &project, &mut report);
+    symlink_dirs(source, target, &plan.symlink_dirs, &plan.declared, &project, &mut report);
     clone_dirs(source, target, &plan.clone_dirs, &project, &mut report);
     copy_dirs(source, target, &plan.copy_dirs, &project, &mut report);
     copy_files(source, target, &plan.copy_globs, &plan.ignore, &mut report)?;
@@ -342,36 +348,140 @@ fn is_relevant(dir_name: &str, project: &ProjectInfo) -> bool {
 
 /// Symlink heavy directories from source into target (project-aware).
 /// `dirs` is already ignore-filtered by [`SyncConfig::resolve`].
+/// Symlink one entry, reporting *why* nothing happened when it doesn't.
+///
+/// `declared` marks entries the user asked for explicitly (`symlink_add`).
+/// Those get a warning on every skip path — a declared path that silently
+/// doesn't get linked leaves the worktree running on private state while
+/// workz reports success (issue #32). Built-in defaults stay quiet, so a
+/// Python project doesn't get told about `node_modules` on every sync.
+fn symlink_one(
+    source: &Path,
+    target: &Path,
+    rel: &str,
+    declared: bool,
+    report: &mut SyncReport,
+) {
+    let src = source.join(rel);
+    let dst = target.join(rel);
+
+    if !src.exists() {
+        if declared {
+            report.warnings.push(format!(
+                "skipped {rel}: not found in the main worktree — nothing was linked \
+                 (check the path, or bootstrap it before creating worktrees)"
+            ));
+        }
+        return;
+    }
+
+    // Never overwrite an existing file, dir, or symlink (idempotent). An
+    // already-correct symlink is a no-op, not a problem — only report the case
+    // where something real is standing in the way.
+    if let Ok(meta) = dst.symlink_metadata() {
+        if declared && !meta.file_type().is_symlink() {
+            report.warnings.push(format!(
+                "skipped {rel}: path already exists in the worktree and is not a symlink \
+                 (a tracked file inside an ignored directory will do this) — it was NOT linked"
+            ));
+        }
+        return;
+    }
+
+    // Parent must exist for nested entries like `website/node_modules`.
+    if let Some(parent) = dst.parent() {
+        if !parent.exists() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                report
+                    .warnings
+                    .push(format!("skipped {rel}: could not create parent directory: {e}"));
+                return;
+            }
+        }
+    }
+
+    match create_symlink(&src, &dst) {
+        Err(e) => report.warnings.push(format!("could not symlink {rel}: {e}")),
+        Ok(()) => {
+            // A synced symlink that git doesn't ignore will show as untracked in
+            // every worktree, and `git add -A` then commits a symlink containing
+            // one machine's absolute path — broken for everyone else and for CI.
+            // The usual cause is a trailing-slash pattern: `.cache/` matches a
+            // directory but NOT a symlink named `.cache` (issue #34).
+            if !is_git_ignored(target, rel) {
+                report.warnings.push(format!(
+                    "{rel} is symlinked but NOT gitignored — `git add -A` would commit an \
+                     absolute path. If .gitignore has `{rel}/`, drop the trailing slash so it \
+                     matches the symlink too"
+                ));
+            }
+            report.symlinked.push(rel.to_string());
+        }
+    }
+}
+
+/// Whether git ignores `rel` inside `dir`. Uses `git check-ignore`, so it
+/// honours every ignore source git does (repo, global, excludes). Returns
+/// `true` when git can't be consulted — we only warn on a definite "not
+/// ignored", never on uncertainty.
+fn is_git_ignored(dir: &Path, rel: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["-C", &dir.to_string_lossy(), "check-ignore", "-q", rel])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(true)
+}
+
 fn symlink_dirs(
     source: &Path,
     target: &Path,
     dirs: &[String],
+    declared: &[String],
     project: &ProjectInfo,
     report: &mut SyncReport,
 ) {
     for dir_name in dirs {
-        // Skip dirs not relevant to this project type
-        if !is_relevant(dir_name, project) {
+        let is_declared = declared.iter().any(|d| d == dir_name);
+
+        // Relevance filtering applies to built-in defaults only: an explicit
+        // `symlink_add` entry means the user knows their layout better than our
+        // project sniffing does (which is why `website/node_modules` in a
+        // monorepo used to vanish — issue #36).
+        if !is_declared && !is_relevant(dir_name, project) {
             continue;
         }
 
-        let src = source.join(dir_name);
-        let dst = target.join(dir_name);
-
-        // Only symlink if the source directory actually exists
-        if !src.exists() {
+        // Glob entries expand to their matches (issue #33). Previously the
+        // pattern was joined as a literal path, never existed, and was dropped
+        // in silence.
+        if dir_name.contains('*') {
+            let pattern = source.join(dir_name);
+            let matches: Vec<std::path::PathBuf> = match glob::glob(&pattern.to_string_lossy()) {
+                Ok(paths) => paths.filter_map(Result::ok).collect(),
+                Err(e) => {
+                    report
+                        .warnings
+                        .push(format!("skipped {dir_name}: invalid glob pattern ({e})"));
+                    continue;
+                }
+            };
+            if matches.is_empty() {
+                if is_declared {
+                    report.warnings.push(format!(
+                        "skipped {dir_name}: glob matched nothing in the main worktree"
+                    ));
+                }
+                continue;
+            }
+            for m in matches {
+                if let Ok(rel) = m.strip_prefix(source) {
+                    symlink_one(source, target, &rel.to_string_lossy(), is_declared, report);
+                }
+            }
             continue;
         }
 
-        // Never overwrite an existing file, dir, or symlink (idempotent).
-        if dst.exists() || dst.symlink_metadata().is_ok() {
-            continue;
-        }
-
-        match create_symlink(&src, &dst) {
-            Err(e) => report.warnings.push(format!("could not symlink {dir_name}: {e}")),
-            Ok(()) => report.symlinked.push(dir_name.clone()),
-        }
+        symlink_one(source, target, dir_name, is_declared, report);
     }
 }
 
@@ -792,6 +902,106 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::create_dir_all(&target).unwrap();
         (source, target)
+    }
+
+    #[test]
+    fn declared_entry_missing_at_source_is_reported() {
+        // Regression for #32: the highest-impact case — a declared path that
+        // doesn't exist in the main checkout was skipped in total silence, so
+        // every worktree quietly ran on private state.
+        let (source, target) = setup_dirs();
+        let mut report = SyncReport::default();
+        let declared = vec!["data/ledger.jsonl".to_string()];
+        symlink_dirs(
+            &source,
+            &target,
+            &declared,
+            &declared,
+            &ProjectInfo::default(),
+            &mut report,
+        );
+        assert!(report.symlinked.is_empty());
+        assert_eq!(report.warnings.len(), 1, "must warn, got {:?}", report.warnings);
+        assert!(report.warnings[0].contains("not found in the main worktree"));
+    }
+
+    #[test]
+    fn declared_entry_blocked_by_a_real_path_is_reported() {
+        // #32(b): a gitignored dir holding one tracked file — git materialises
+        // the directory, so workz can never symlink it. Must say so.
+        let (source, target) = setup_dirs();
+        fs::create_dir_all(source.join("models")).unwrap();
+        fs::create_dir_all(target.join("models")).unwrap();
+        fs::write(target.join("models/README.md"), "index").unwrap();
+
+        let mut report = SyncReport::default();
+        let declared = vec!["models".to_string()];
+        symlink_dirs(&source, &target, &declared, &declared, &ProjectInfo::default(), &mut report);
+        assert!(report.symlinked.is_empty());
+        assert!(
+            report.warnings.iter().any(|w| w.contains("not a symlink")),
+            "got {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn built_in_defaults_stay_quiet_when_they_dont_apply() {
+        // The other half of #32: warning on every irrelevant built-in would
+        // bury the real signal. Only user-declared entries are noisy.
+        let (source, target) = setup_dirs();
+        let mut report = SyncReport::default();
+        let builtins = vec!["node_modules".to_string(), "target".to_string()];
+        symlink_dirs(
+            &source,
+            &target,
+            &builtins,
+            &[], // nothing declared by the user
+            &ProjectInfo::default(),
+            &mut report,
+        );
+        assert!(report.warnings.is_empty(), "built-ins must be quiet: {:?}", report.warnings);
+    }
+
+    #[test]
+    fn glob_in_symlink_add_expands_and_links_matches() {
+        // #33: globs were joined as a literal path, never matched, and vanished.
+        let (source, target) = setup_dirs();
+        fs::create_dir_all(source.join("models/sub")).unwrap();
+        fs::write(source.join("models/a.gguf"), "w").unwrap();
+
+        let mut report = SyncReport::default();
+        let declared = vec!["models/*".to_string()];
+        symlink_dirs(&source, &target, &declared, &declared, &ProjectInfo::default(), &mut report);
+
+        assert_eq!(report.symlinked.len(), 2, "both matches link: {:?}", report.symlinked);
+        assert!(target.join("models/a.gguf").symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(target.join("models/sub").symlink_metadata().unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn declared_entry_bypasses_the_project_relevance_filter() {
+        // #36: `website/node_modules` in a monorepo with no root package.json was
+        // dropped by is_relevant(). An explicit declaration beats our sniffing,
+        // and the nested parent directory gets created.
+        let (source, target) = setup_dirs();
+        fs::create_dir_all(source.join("website/node_modules")).unwrap();
+
+        let mut report = SyncReport::default();
+        let declared = vec!["website/node_modules".to_string()];
+        symlink_dirs(&source, &target, &declared, &declared, &ProjectInfo::default(), &mut report);
+        assert_eq!(report.symlinked, vec!["website/node_modules".to_string()]);
+    }
+
+    #[test]
+    fn summary_does_not_claim_success_when_work_was_skipped() {
+        // The message that made #32 invisible: "nothing to sync (already up to
+        // date)" printed while declared entries had been dropped.
+        let mut report = SyncReport::default();
+        assert!(report.human_summary().contains("already up to date"));
+        report.warnings.push("skipped x: not found".to_string());
+        assert!(report.human_summary().contains("see the warnings"));
+        assert!(!report.human_summary().contains("already up to date"));
     }
 
     #[test]

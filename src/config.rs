@@ -110,6 +110,11 @@ pub struct SyncPlan {
     pub copy_globs: Vec<String>,
     /// Entries to skip (used for glob-level filtering during copy).
     pub ignore: Vec<String>,
+    /// Entries the user explicitly declared via `symlink_add`, as opposed to
+    /// built-in defaults. Skipping one of these is a problem worth reporting
+    /// (issue #32); skipping a default that doesn't apply to the project is
+    /// normal and stays quiet.
+    pub declared: Vec<String>,
 }
 
 impl SyncConfig {
@@ -178,7 +183,8 @@ impl SyncConfig {
         let mut copy_globs = copy_globs;
         dedup(&mut copy_globs);
 
-        SyncPlan { symlink_dirs, copy_dirs, clone_dirs, copy_globs, ignore }
+        let declared = self.symlink_add.clone();
+        SyncPlan { symlink_dirs, copy_dirs, clone_dirs, copy_globs, ignore, declared }
     }
 }
 

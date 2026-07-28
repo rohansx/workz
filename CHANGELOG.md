@@ -55,6 +55,37 @@ All notable changes to workz are documented here. This project adheres to
 
 ### Fixed
 
+- **sync no longer skips declared paths in silence.** `symlink_dirs` had three
+  bare `continue`s — irrelevant-to-project, source missing, target already
+  present — so a declared `symlink_add` entry could be dropped while workz
+  printed `nothing to sync (already up to date)` and `ready!`. A worktree then
+  looked correct while running on private state. Every skip of a *user-declared*
+  path now reports why (built-in defaults that don't apply stay quiet), and the
+  summary says `nothing synced — see the warnings below` instead of claiming
+  success. (#32)
+
+- **Globs in `symlink_add` now work.** They were joined as a literal path, never
+  matched, and were swallowed by the silent missing-source skip. `models/*` now
+  expands and links each match — which is also the clean fix for a gitignored
+  directory containing one tracked file, since the directory itself can never be
+  symlinked. Invalid patterns are reported. (#33)
+
+- **Warn when a synced symlink isn't gitignored.** The conventional `.cache/`
+  pattern matches a *directory*, not a symlink named `.cache`, so synced links
+  showed as untracked and `git add -A` committed a symlink containing one
+  machine's absolute path — broken for every other checkout and for CI. workz now
+  runs `git check-ignore` per linked path and names the trailing-slash trap. (#34)
+
+- **`workz doctor` reconciles declared vs actual symlinks.** It only checked
+  whether existing symlinks dangle, so a worktree where *nothing* was linked
+  passed with `[ok] no broken symlinks`. It now asserts every `symlink_add` entry
+  exists, is a symlink, and resolves into the main worktree. (#35)
+
+- **Explicitly declared paths bypass project-type detection.** `website/node_modules`
+  in a monorepo with no root `package.json` was dropped by the relevance filter;
+  an explicit `symlink_add` entry now wins, and its parent directory is created
+  as needed. (#36, partial — zero-config nested detection still open)
+
 - **Same-named worktrees in different repos no longer collide** (data-loss-adjacent).
   The port registry was keyed by the bare branch slug, so `workz start feature-x
   --isolated` in two repos double-booked the same port range and database, and
