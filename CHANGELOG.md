@@ -3,6 +3,33 @@
 All notable changes to workz are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`--create-db` no longer swallows a failed `createdb`.** Any non-zero exit was
+  assumed to mean "already exists" and reported as a benign skip, so workz exited
+  0 with `.env.local` and the registry both naming a database that did not exist.
+  With `--from-db` the usual cause isn't "already exists" at all — it's Postgres
+  refusing to copy a template that has an open session. workz now asks Postgres
+  directly (`select 1 from pg_database …`) instead of inferring, prints
+  `createdb`'s real stderr, and hints at the open-session case. `create_database`
+  returns a `DbOutcome` so callers can act: **`workz claude-hook` now fails**
+  rather than handing Claude Code a worktree with a dangling `DB_NAME` — the hook
+  path was the worst case, since Claude Code doesn't surface a successful hook's
+  stderr. `workz doctor` also verifies every registry allocation's database still
+  exists. (#39)
+
+- **`clone` no longer always claims the filesystem can't reflink.** The probe
+  compared inodes — a *hardlink* test. A CoW clone (`clonefile` on APFS,
+  `cp --reflink` on btrfs/XFS) allocates a new inode that shares extents, so the
+  predicate could never be true: `Reflinked` was unreachable and every clone
+  emitted a false "filesystem doesn't support reflink" warning, nudging users to
+  abandon a feature that was working. workz now trusts the tool — `--reflink=always`
+  on Linux and `cp -c` on macOS both fail honestly when cloning is unsupported, so
+  the exit status is the answer. `workz doctor`'s reflink check had the same bug
+  (and compounded it by using `--reflink=auto`, which degrades silently). (#40)
+
 ## [0.15.0] ("Lights On")
 
 The runtime release. workz stopped at *provisioning* a worktree — allocating a
