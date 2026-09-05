@@ -52,6 +52,7 @@ fn diagnose(fix: bool) -> Result<(Vec<String>, bool)> {
     problems += check_live_on_orphaned_ports(fix, &mut out);
     problems += check_config(&root, &mut out);
     problems += check_orphaned_ports(fix, &mut out);
+    problems += check_registry_databases(&mut out);
     problems += check_worktrees(&root, fix, &mut out);
     check_reflink_support(&root, &mut out);
     check_tooling(&mut out);
@@ -284,6 +285,50 @@ fn check_live_on_orphaned_ports(fix: bool, out: &mut Vec<String>) -> u32 {
         let _ = isolation::reap_ports(&ports_to_reap, true);
     }
     0
+}
+
+/// Every registry allocation names a `db_name`. Check the database behind it
+/// actually exists (#39) — a worktree whose `.env.local` carries a `DB_NAME`
+/// that points at nothing fails later as an application bug, not a provisioning
+/// one, which is expensive to diagnose. Silent no-op when there's no `psql` to
+/// ask (workz never required Postgres).
+fn check_registry_databases(out: &mut Vec<String>) -> u32 {
+    let registry = isolation::load_registry();
+    if registry.allocations.is_empty() {
+        return 0;
+    }
+    // Only worktrees that still exist — orphaned allocations are reported by
+    // check_orphaned_ports, and their databases go with them.
+    let live: Vec<&isolation::PortAllocation> = registry
+        .allocations
+        .values()
+        .filter(|a| Path::new(&a.worktree_path).exists())
+        .collect();
+    if live.is_empty() {
+        return 0;
+    }
+
+    let mut missing = Vec::new();
+    for alloc in &live {
+        match isolation::database_exists(&alloc.db_name) {
+            Some(true) => {}
+            Some(false) => missing.push(format!("{} ({})", alloc.db_name, alloc.branch)),
+            // Couldn't ask — no psql, or it couldn't connect. Don't guess.
+            None => return 0,
+        }
+    }
+
+    if missing.is_empty() {
+        out.push(format!("[ok] all {} allocated database(s) exist", live.len()));
+        0
+    } else {
+        for m in &missing {
+            out.push(format!(
+                "[warn] database {m} is in the registry but does not exist — re-run: workz sync --isolated --create-db"
+            ));
+        }
+        missing.len() as u32
+    }
 }
 
 fn check_orphaned_ports(fix: bool, out: &mut Vec<String>) -> u32 {

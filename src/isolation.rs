@@ -262,29 +262,88 @@ fn createdb_args(db_name: &str, from_db: Option<&str>) -> Vec<String> {
 /// `postgres:16` container when no system Postgres is available (v0.14).
 /// The container is named `workz-pg-<slug>` and torn down by
 /// [`drop_database`] on `workz done --cleanup-db`.
-pub fn create_database(db_name: &str, from_db: Option<&str>) {
+/// What `create_database` actually did. Returned (rather than swallowed) so a
+/// caller can decide how loud to be — `claude-hook` in particular must fail,
+/// because a worktree carrying a `DB_NAME` that points at nothing is worse than
+/// no worktree at all (#39).
+#[derive(Debug, PartialEq, Eq)]
+pub enum DbOutcome {
+    Created,
+    /// The database was already there — the one genuinely silent case.
+    AlreadyExists,
+    /// `createdb` failed for some other reason; carries its stderr.
+    Failed(String),
+    /// No system `createdb`; a docker postgres container was started instead.
+    DockerFallback,
+}
+
+/// Whether a database already exists, asked directly rather than inferred from
+/// a `createdb` exit code. `None` when we couldn't tell (no `psql`, or it
+/// couldn't connect) — the caller must then treat a failure as a real failure
+/// rather than assuming "already exists".
+pub fn database_exists(db_name: &str) -> Option<bool> {
+    let out = Command::new("psql")
+        .args([
+            "-d",
+            "postgres",
+            "-tAc",
+            &format!("select 1 from pg_database where datname = '{db_name}'"),
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim() == "1")
+}
+
+pub fn create_database(db_name: &str, from_db: Option<&str>) -> DbOutcome {
     // Status goes to stderr so it never pollutes `workz sync --json` stdout.
     let args = createdb_args(db_name, from_db);
-    match Command::new("createdb").args(&args).status() {
-        Ok(s) if s.success() => {
+    match Command::new("createdb").args(&args).output() {
+        Ok(out) if out.status.success() => {
             let via = from_db
                 .map(|t| format!(" (from template '{t}')"))
                 .unwrap_or_default();
             eprintln!("  created database '{db_name}'{via}");
-            return;
+            DbOutcome::Created
         }
-        // createdb has no --if-exists; a non-zero exit usually means it already
-        // exists. Non-fatal — this is an opt-in convenience.
-        Ok(_) => {
-            eprintln!("  database '{db_name}' already exists or could not be created (skipping)");
-            return;
+        Ok(out) => {
+            // `createdb` has no `--if-exists`, so a non-zero exit was previously
+            // *assumed* to mean "already exists". It usually doesn't: with
+            // `--from-db` the common failure is Postgres refusing to copy a
+            // template that has an open session, and that was being reported as
+            // a benign skip while workz exited 0 (#39). Ask Postgres directly.
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            match database_exists(db_name) {
+                Some(true) => {
+                    eprintln!("  database '{db_name}' already exists (skipping)");
+                    DbOutcome::AlreadyExists
+                }
+                _ => {
+                    eprintln!("  warning: could not create database '{db_name}'");
+                    if !stderr.is_empty() {
+                        for line in stderr.lines() {
+                            eprintln!("    {line}");
+                        }
+                    }
+                    if from_db.is_some() && stderr.contains("being accessed by other users") {
+                        eprintln!(
+                            "    hint: the template has an open session — close it (psql/rails \
+                             console/dev server) and retry"
+                        );
+                    }
+                    DbOutcome::Failed(stderr)
+                }
+            }
         }
         Err(_) => {
             // No system `createdb` — try the docker fallback.
             eprintln!("  createdb not found, falling back to docker postgres…");
+            start_docker_postgres(db_name, from_db);
+            DbOutcome::DockerFallback
         }
     }
-    start_docker_postgres(db_name, from_db);
 }
 
 /// Best-effort: drop the PostgreSQL database for a branch. If we
@@ -967,6 +1026,29 @@ fn unix_secs_to_rfc3339(secs: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Regression for #39: a non-zero `createdb` exit must not be reported as
+    /// "already exists". The distinction is now made by asking Postgres, and the
+    /// outcome is *returned* so callers can act — previously the function
+    /// returned `()`, so `claude-hook` structurally could not know it had handed
+    /// back a worktree whose DB_NAME pointed at nothing.
+    #[test]
+    fn db_outcome_distinguishes_failure_from_already_exists() {
+        use super::DbOutcome;
+        // The variants a caller must be able to tell apart.
+        assert_ne!(DbOutcome::Created, DbOutcome::AlreadyExists);
+        assert_ne!(
+            DbOutcome::Failed("boom".into()),
+            DbOutcome::AlreadyExists,
+            "a real failure must never compare equal to a benign skip"
+        );
+        // A failure carries the stderr so the caller can surface the real cause
+        // (e.g. 'source database is being accessed by other users').
+        match DbOutcome::Failed("source database \"x\" is being accessed".into()) {
+            DbOutcome::Failed(msg) => assert!(msg.contains("being accessed")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
     use super::*;
 
     #[test]

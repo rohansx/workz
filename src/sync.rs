@@ -552,78 +552,46 @@ pub enum ReflinkOutcome {
 /// Copy `src` directory to `dst` using CoW reflink when the filesystem
 /// supports it; otherwise do a regular recursive copy.
 fn reflink_copy_dir(src: &Path, dst: &Path) -> Result<ReflinkOutcome> {
-    // Pick the platform's reflink-aware copy. We shell out rather than
-    // pulling a `reflink` crate dep — the syscall surface is fiddly and
-    // `cp` already does the right thing.
+    // Trust the tool instead of inspecting the result (#40). A CoW clone is
+    // *not* a hardlink — `clonefile(2)` on APFS and `cp --reflink` on
+    // btrfs/XFS both allocate a new inode that shares extents with the source
+    // — so the old `src.ino() == dst.ino()` probe tested for a hardlink and
+    // could never be true, making `Reflinked` unreachable and every clone
+    // report a false "filesystem doesn't support reflink" warning.
+    //
+    // Both platforms give us an honest exit code if we ask for it:
+    //   - Linux: `--reflink=always` fails when the FS can't clone (`=auto`
+    //     deliberately degrades in silence, which is why it can't be used here).
+    //   - macOS: `cp -c` errors out rather than silently degrading.
+    // So a successful run *is* the confirmation, and a failure is the signal to
+    // fall back to a plain recursive copy.
     #[cfg(target_os = "linux")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("cp");
-        c.args(["-R", "--reflink=auto"]);
-        c
-    };
+    let clone_args: Option<&[&str]> = Some(&["-R", "--reflink=always"]);
     #[cfg(target_os = "macos")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("cp");
-        c.args(["-R", "-c"]);
-        c
-    };
+    let clone_args: Option<&[&str]> = Some(&["-R", "-c"]);
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let mut cmd = {
-        let mut c = std::process::Command::new("cp");
-        c.args(["-R"]);
-        c
-    };
+    let clone_args: Option<&[&str]> = None;
 
-    // Run reflink; capture exit status. If `cp` reported a non-fatal
-    // reflink failure but the copy itself succeeded, it still exits 0 —
-    // the only way to know whether reflink was used is to compare inodes
-    // (or the on-disk size) afterwards.
-    cmd.arg(src).arg(dst);
-    let status = cmd.status().context("failed to spawn cp")?;
-    if !status.success() {
-        // Hard failure — try the recursive copy fallback.
-        copy_dir_recursive_simple(src, dst);
-        return Ok(ReflinkOutcome::CopiedFallback);
-    }
-
-    // Verify: same inode on a probe file means the reflink actually happened.
-    // If not, treat the run as a full copy (the warning still gets attached
-    // by the caller via the `CopiedFallback` outcome).
-    if probe_was_reflinked(src, dst) {
-        Ok(ReflinkOutcome::Reflinked)
-    } else {
-        Ok(ReflinkOutcome::CopiedFallback)
-    }
-}
-
-/// Pick a small file from `src`, ask the OS for its inode in both `src` and
-/// `dst`. If the inodes match, the directory tree is reflinked (or at least
-/// that file is — close enough for our purpose).
-fn probe_was_reflinked(src: &Path, dst: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let Some(probe_src) = pick_probe_file(src) else { return false };
-    let Some(probe_dst) = pick_probe_file(dst) else { return false };
-    let Ok(m1) = std::fs::metadata(&probe_src) else { return false };
-    let Ok(m2) = std::fs::metadata(&probe_dst) else { return false };
-    m1.ino() == m2.ino() && m1.dev() == m2.dev()
-}
-
-/// Walk one level into `dir` and return the first regular file found.
-fn pick_probe_file(dir: &Path) -> Option<std::path::PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    for e in entries.flatten() {
-        let p = e.path();
-        if p.is_file() {
-            return Some(p);
+    if let Some(args) = clone_args {
+        let status = std::process::Command::new("cp")
+            .args(args)
+            .arg(src)
+            .arg(dst)
+            .status()
+            .context("failed to spawn cp")?;
+        if status.success() {
+            return Ok(ReflinkOutcome::Reflinked);
         }
-        if p.is_dir() {
-            if let Some(found) = pick_probe_file(&p) {
-                return Some(found);
-            }
-        }
+        // Clone unsupported (or partially written) — clear any partial result
+        // before the fallback so the copy starts from a clean destination.
+        let _ = std::fs::remove_dir_all(dst);
     }
-    None
+
+    copy_dir_recursive_simple(src, dst);
+    Ok(ReflinkOutcome::CopiedFallback)
 }
+
+
 
 /// Probe whether the filesystem containing `dir` supports CoW reflink. Writes
 /// a tiny temp file, attempts to reflink it, and checks whether the two
@@ -644,9 +612,13 @@ pub fn probe_reflink_support(dir: &Path) -> Option<bool> {
     let data = b"workz-reflink-probe\n".repeat(256);
     std::fs::write(&src, &data).ok()?;
 
+    // `--reflink=always` / `-c` fail when the filesystem can't clone, so the
+    // exit status is the answer. (`--reflink=auto` must NOT be used here: it
+    // degrades to a plain copy silently and would always report success.)
+    // The old inode comparison was a hardlink test and always said "no" (#40).
     #[cfg(target_os = "linux")]
     let status = std::process::Command::new("cp")
-        .args(["--reflink=auto", src.to_str()?, dst.to_str()?])
+        .args(["--reflink=always", src.to_str()?, dst.to_str()?])
         .status();
     #[cfg(target_os = "macos")]
     let status = std::process::Command::new("cp")
@@ -656,18 +628,7 @@ pub fn probe_reflink_support(dir: &Path) -> Option<bool> {
     let status: std::io::Result<std::process::ExitStatus> =
         Err(std::io::Error::new(std::io::ErrorKind::Other, "unsupported"));
 
-    let status = status.ok()?;
-
-    // Check inode *before* cleanup so we can compare src vs dst.
-    let supported = if status.success() {
-        use std::os::unix::fs::MetadataExt;
-        match (std::fs::metadata(&src), std::fs::metadata(&dst)) {
-            (Ok(s), Ok(d)) => s.ino() == d.ino() && s.dev() == d.dev(),
-            _ => false,
-        }
-    } else {
-        false
-    };
+    let supported = status.ok()?.success();
 
     // Clean up regardless of outcome.
     let _ = std::fs::remove_file(&src);
@@ -1097,6 +1058,44 @@ mod tests {
         assert!(target.join("cache/a.txt").exists());
         assert!(target.join("cache/b.txt").exists());
         assert_eq!(fs::read_to_string(target.join("cache/a.txt")).unwrap(), "hello");
+    }
+
+    #[test]
+    fn reflink_probe_agrees_with_the_filesystem() {
+        // Regression for #40: the probe used to compare inodes, which is a
+        // *hardlink* test — a CoW clone always allocates a new inode, so it
+        // reported "unsupported" even on APFS/btrfs where cloning works.
+        // Ground-truth the filesystem independently and assert the probe agrees;
+        // this passes on a non-reflink FS (both false) and on a reflink FS (both
+        // true), where the old inode logic would have failed.
+        let (source, _target) = setup_dirs();
+        let a = source.join("probe_src");
+        fs::write(&a, b"x".repeat(4096)).unwrap();
+        let b = source.join("probe_dst");
+
+        #[cfg(target_os = "linux")]
+        let args: &[&str] = &["--reflink=always"];
+        #[cfg(target_os = "macos")]
+        let args: &[&str] = &["-c"];
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let args: &[&str] = &[];
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let truth = std::process::Command::new("cp")
+                .args(args)
+                .arg(&a)
+                .arg(&b)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            let _ = fs::remove_file(&b);
+            assert_eq!(
+                probe_reflink_support(&source),
+                Some(truth),
+                "probe must match what the filesystem actually does"
+            );
+        }
     }
 
     #[test]

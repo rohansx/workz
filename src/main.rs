@@ -286,7 +286,14 @@ fn cmd_start(
             println!("    framework={:?}", framework);
         }
         if create_db || from_db.is_some() {
-            isolation::create_database(&iso.db_name, from_db);
+            if let isolation::DbOutcome::Failed(_) =
+                isolation::create_database(&iso.db_name, from_db)
+            {
+                eprintln!(
+                    "  note: DB_NAME={} is set in .env.local but the database was NOT created",
+                    iso.db_name
+                );
+            }
         }
         Some(iso)
     } else {
@@ -493,7 +500,20 @@ fn cmd_claude_hook(
             iso.port, iso.port_end, iso.db_name, iso.compose_project
         );
         if create_db || from_db.is_some() {
-            isolation::create_database(&iso.db_name, from_db);
+            // Fail the hook rather than hand Claude Code a worktree whose
+            // DB_NAME points at nothing. Claude Code doesn't surface a
+            // *successful* hook's stderr, so a warning here would be invisible
+            // and the breakage would surface later as an application bug (#39).
+            if let isolation::DbOutcome::Failed(err) =
+                isolation::create_database(&iso.db_name, from_db)
+            {
+                bail!(
+                    "could not create database '{}' — refusing to hand back a worktree with a \
+                     dangling DB_NAME: {}",
+                    iso.db_name,
+                    err.lines().next().unwrap_or("createdb failed")
+                );
+            }
         }
         Some(iso)
     } else {
@@ -1300,7 +1320,14 @@ fn cmd_sync(
     // Optionally create the Postgres database (status → stderr, JSON-safe).
     match &iso {
         Some(i) if create_db || from_db.is_some() => {
-            isolation::create_database(&i.db_name, from_db);
+            if let isolation::DbOutcome::Failed(_) =
+                isolation::create_database(&i.db_name, from_db)
+            {
+                eprintln!(
+                    "note: DB_NAME={} is set in .env.local but the database was NOT created",
+                    i.db_name
+                );
+            }
         }
         None if create_db || from_db.is_some() => {
             eprintln!("note: --create-db requires --isolated (skipping)");
